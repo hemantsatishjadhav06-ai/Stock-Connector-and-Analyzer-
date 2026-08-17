@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Generated analysis artefacts
+out/
+*.sqlite
+*.sqlite3
+*.db
+reports/*.html
+!data/samples/*.json
+
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store

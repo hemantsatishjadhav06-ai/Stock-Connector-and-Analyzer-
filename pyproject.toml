@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equity-analyst"
+version = "0.1.0"
+description = "Autonomous equity research, forensic and valuation engine (Buffett / Graham / Bharat Shah / Buffetology) with a SQL layer and chart-first HTML reporting."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+# The core engine is deliberately zero-dependency: stdlib + sqlite3 + hand-rolled
+# SVG only, so a subscriber can reproduce a report on any machine with Python.
+dependencies = []
+
+[project.optional-dependencies]
+# Richer data coverage. Each is imported lazily; absence lowers the Verification
+# Score (data completeness) instead of breaking the run.
+openbb = ["openbb>=4.1"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+equity-analyst = "equity_analyst.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["equity_analyst*"]
+
+[tool.setuptools.package-data]
+equity_analyst = ["sql/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
