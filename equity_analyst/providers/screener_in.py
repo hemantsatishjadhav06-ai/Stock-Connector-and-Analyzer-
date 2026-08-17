@@ -300,17 +300,21 @@ def _parse_statement(
     if not periods:
         return []
 
-    columns: Dict[int, Dict[str, Any]] = {
-        i: {
+    # Screener appends a trailing-twelve-month column whose header carries no
+    # parseable date. It is NOT a fiscal year: loading it as one would give the
+    # latest "year" a P&L with no balance sheet behind it and would skew every
+    # CAGR window by an extra period. Classify it as 'ttm' so v_annual ignores it.
+    columns: Dict[int, Dict[str, Any]] = {}
+    for i, (_, end) in enumerate(periods):
+        is_fiscal = _is_iso_date(end)
+        columns[i] = {
             "ticker": ticker,
-            "period_label": _fiscal_label(end),
-            "period_end": end,
-            "period_type": "annual",
+            "period_label": _fiscal_label(end) if is_fiscal else end.strip().upper(),
+            "period_end": end if is_fiscal else None,
+            "period_type": "annual" if is_fiscal else "ttm",
             "source": source,
             "as_of": as_of,
         }
-        for i, (_, end) in enumerate(periods)
-    }
     for label, values in _table_rows(table):
         column = mapping.get(label)
         if column is None:
@@ -327,6 +331,16 @@ def _parse_statement(
         for row in columns.values()
         if payload_keys & set(row)  # drop period columns with no data at all
     ]
+
+
+def _is_iso_date(text: str) -> bool:
+    import datetime as dt
+
+    try:
+        dt.date.fromisoformat((text or "").strip())
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def _fiscal_label(iso_date: str) -> str:

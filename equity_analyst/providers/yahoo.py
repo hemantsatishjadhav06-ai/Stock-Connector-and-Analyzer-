@@ -330,6 +330,40 @@ def _fiscal_label(iso_date: str) -> str:
     return f"{d.strftime('%b')}-{d.strftime('%y')}"
 
 
+SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+
+
+def fetch_news(ticker: str, limit: int = 25) -> List[Dict[str, Any]]:
+    """Recent company news headlines for the §5 linkage section."""
+    from ..db import utc_now
+
+    url = f"{SEARCH_URL}?q={ticker}&newsCount={limit}&quotesCount=0"
+    payload = http_get_json(url)
+    as_of = utc_now()
+    out: List[Dict[str, Any]] = []
+    for item in payload.get("news") or []:
+        published = item.get("providerPublishTime")
+        stamp = None
+        if published:
+            stamp = (
+                _dt.datetime.fromtimestamp(published, _dt.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+            )
+        out.append(
+            {
+                "ticker": ticker,
+                "published_at": stamp,
+                "headline": item.get("title"),
+                "url": item.get("link"),
+                "publisher": item.get("publisher"),
+                "source": "yahoo.search",
+                "as_of": as_of,
+            }
+        )
+    return [r for r in out if r["headline"]]
+
+
 def fetch_commodity_series(
     symbol: str, years: int = 10
 ) -> List[Dict[str, Any]]:
