@@ -87,6 +87,7 @@ and `pip install -e '.[openbb]'` to add OpenBB as a data source.
 | `--backtest` | run the cost-aware backtester over the price history |
 | `--cost-bps 45` | round-trip trading cost in basis points (default 30) |
 | `--benchmark ^NSEI` | regime benchmark (defaults per market) |
+| `--network-budget 60` | whole-run ceiling on network time, seconds (default 120) |
 
 The process exits `2` when the forensic screen fails, so it composes with CI.
 
@@ -206,12 +207,16 @@ That trick does not survive a TLS-inspecting proxy. The durable fix is a
 datacenter IPs where Yahoo will not. Failing both, capture one good pull with
 `--save-bundle` and iterate offline against it.
 
+A throttled source cannot hang the run: retry budgets are capped by a
+whole-run `--network-budget` (120s by default). Once it is spent the remaining
+fetches are skipped, the run finishes on what it has, and the report says so.
+
 ---
 
 ## Development
 
 ```bash
-python3 -m pytest tests/ -q          # 145 tests, no network required
+python3 -m pytest tests/ -q          # 148 tests, no network required
 python3 tools/make_sample_bundle.py  # regenerate the synthetic fixture
 ```
 

@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--offline", dest="offline_file", help="replay a saved JSON bundle")
     p.add_argument("--save-bundle", help="save the raw pull to JSON for later replay")
     p.add_argument("--no-network", action="store_true", help="never touch the network")
+    p.add_argument("--network-budget", type=float, default=120.0, metavar="SECONDS",
+                   help="whole-run ceiling on network time (default 120; 0 = no limit)")
 
     s = p.add_argument_group("signals & backtest (§S, from indian-stock-signal-ai)")
     s.add_argument("--signals", action="store_true",
@@ -96,6 +98,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         commodities=args.commodities,
         price_years=args.price_years,
         allow_network=not args.no_network,
+        network_budget_seconds=args.network_budget,
         data=DataSettings.from_env(),
         with_signals=args.signals,
         with_backtest=args.backtest,

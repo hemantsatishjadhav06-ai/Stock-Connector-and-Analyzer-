@@ -37,6 +37,51 @@ class FetchError(RuntimeError):
     """Raised inside a provider; callers convert it into a coverage gap."""
 
 
+class NetworkBudget:
+    """A whole-run wall-clock ceiling on network time.
+
+    Retry budgets compound: seven throttled URLs at four attempts each, with
+    backoff and a server-supplied ``Retry-After``, can keep a CLI run silent for
+    the better part of ten minutes. Once the market is clearly refusing to serve
+    this IP, spending more time confirms nothing — the run should degrade to a
+    coverage gap and finish.
+
+    The budget is process-global and advisory: it is checked before each attempt
+    and before each sleep, so an in-flight request always completes.
+    """
+
+    def __init__(self) -> None:
+        self.deadline: Optional[float] = None
+        self.exhausted_note: Optional[str] = None
+
+    def start(self, seconds: Optional[float]) -> None:
+        self.deadline = (time.monotonic() + seconds) if seconds and seconds > 0 else None
+        self.exhausted_note = None
+
+    def clear(self) -> None:
+        self.deadline = None
+
+    @property
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    def remaining(self) -> Optional[float]:
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
+
+    def note(self, url: str) -> None:
+        if self.exhausted_note is None:
+            self.exhausted_note = (
+                "network budget exhausted; remaining fetches were skipped rather "
+                "than retried further"
+            )
+
+
+#: Shared by every provider in a run.
+BUDGET = NetworkBudget()
+
+
 def _cffi_session():
     """A TLS-impersonating session, when `curl_cffi` is installed.
 
@@ -89,6 +134,12 @@ def http_get(
 
     last: Optional[Exception] = None
     for attempt in range(retries):
+        if BUDGET.expired:
+            BUDGET.note(url)
+            raise FetchError(
+                f"network budget exhausted before {url}"
+                + (f" (last error: {last})" if last else "")
+            )
         wait = backoff * (2 ** attempt)
         try:
             req = urllib.request.Request(url, headers=hdrs)
@@ -113,7 +164,14 @@ def http_get(
         except Exception as exc:  # transport / TLS / timeout
             last = exc
         if attempt < retries - 1:
-            time.sleep(min(wait, 30.0))
+            wait = min(wait, 30.0)
+            left = BUDGET.remaining()
+            if left is not None:
+                if left <= 0:
+                    BUDGET.note(url)
+                    raise FetchError(f"network budget exhausted retrying {url} ({last})")
+                wait = min(wait, left)     # never sleep past the deadline
+            time.sleep(wait)
     raise FetchError(f"unreachable after {retries} attempts: {url} ({last})")
 
 

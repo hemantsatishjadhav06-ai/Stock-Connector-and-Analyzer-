@@ -205,6 +205,10 @@ class RunConfig:
     commodities: List[str] = field(default_factory=list)
     price_years: int = 10
     allow_network: bool = True
+    #: Whole-run ceiling on network time. Retry budgets compound across the
+    #: ~7 URLs a full run fetches; without a ceiling a throttled source can
+    #: keep the CLI silent for minutes. 0 disables the ceiling.
+    network_budget_seconds: float = 120.0
     data: DataSettings = field(default_factory=DataSettings)
     #: §S extras. Off by default so a plain valuation run stays fast.
     with_signals: bool = False

@@ -53,6 +53,16 @@ class Report:
 
 
 def run(config: RunConfig) -> Report:
+    from .providers.base import BUDGET
+
+    BUDGET.start(config.network_budget_seconds if config.allow_network else None)
+    try:
+        return _run(config)
+    finally:
+        BUDGET.clear()
+
+
+def _run(config: RunConfig) -> Report:
     db = Database(config.db_path)
     db.start_run(
         config.run_id, config.ticker, config.market, config.horizon_years, ENGINE_VERSION
@@ -104,6 +114,14 @@ def run(config: RunConfig) -> Report:
 
     for domain, reason in (result.gaps or {}).items():
         report.warnings.append(f"{domain}: {reason}")
+
+    from .providers.base import BUDGET
+
+    if BUDGET.exhausted_note:
+        report.warnings.append(
+            f"{BUDGET.exhausted_note}. Raise it with --network-budget if the "
+            f"source is merely slow rather than blocking."
+        )
     return report
 
 

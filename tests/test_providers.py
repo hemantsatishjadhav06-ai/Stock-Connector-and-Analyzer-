@@ -210,3 +210,45 @@ def test_retry_after_header_is_respected():
     assert _retry_after_seconds(err("30"), 2.0) == 30.0
     # HTTP-date form is legal but not worth parsing; fall back to our backoff.
     assert _retry_after_seconds(err("Wed, 21 Oct 2026 07:28:00 GMT"), 2.0) == 2.0
+
+
+# -- network budget --------------------------------------------------------
+
+
+def test_budget_expires_and_short_circuits():
+    """A whole-run ceiling must stop retries rather than let them compound."""
+    import time
+
+    from equity_analyst.providers.base import BUDGET, FetchError, http_get
+
+    BUDGET.start(0.001)
+    time.sleep(0.01)
+    try:
+        with pytest.raises(FetchError, match="budget exhausted"):
+            http_get("https://example.invalid/never-reached")
+        assert BUDGET.exhausted_note
+    finally:
+        BUDGET.clear()
+
+
+def test_budget_disabled_by_default():
+    from equity_analyst.providers.base import BUDGET
+
+    BUDGET.start(None)
+    try:
+        assert not BUDGET.expired
+        assert BUDGET.remaining() is None
+    finally:
+        BUDGET.clear()
+
+
+def test_budget_reports_remaining_time():
+    from equity_analyst.providers.base import BUDGET
+
+    BUDGET.start(30.0)
+    try:
+        left = BUDGET.remaining()
+        assert left is not None and 0 < left <= 30.0
+        assert not BUDGET.expired
+    finally:
+        BUDGET.clear()
