@@ -1,0 +1,199 @@
+{
+ "schemaVersion": 1,
+ "generatedBy": "understand-anything scan-project.mjs + extract-import-map.mjs, synthesised",
+ "generatedAt": "2026-08-17T01:17:57+00:00",
+ "project": {
+  "name": "Stock-Connector-and-Analyzer-",
+  "totalFiles": 46,
+  "complexity": "moderate",
+  "languages": {
+   "markdown": 3,
+   "json": 2,
+   "python": 39,
+   "sql": 1,
+   "toml": 1
+  }
+ },
+ "nodes": [
+  {
+   "id": "equity_analyst/__init__.py",
+   "lines": 17,
+   "files": 1,
+   "language": "python",
+   "layer": "0-orchestrate"
+  },
+  {
+   "id": "equity_analyst/cli.py",
+   "lines": 225,
+   "files": 1,
+   "language": "python",
+   "layer": "0-orchestrate"
+  },
+  {
+   "id": "equity_analyst/config.py",
+   "lines": 228,
+   "files": 1,
+   "language": "python",
+   "layer": "0-orchestrate"
+  },
+  {
+   "id": "equity_analyst/pipeline.py",
+   "lines": 347,
+   "files": 1,
+   "language": "python",
+   "layer": "0-orchestrate"
+  },
+  {
+   "id": "equity_analyst/providers",
+   "lines": 1794,
+   "files": 7,
+   "language": "python",
+   "layer": "1-collect"
+  },
+  {
+   "id": "equity_analyst/db.py",
+   "lines": 139,
+   "files": 1,
+   "language": "python",
+   "layer": "2-sql"
+  },
+  {
+   "id": "equity_analyst/sql",
+   "lines": 547,
+   "files": 1,
+   "language": "sql",
+   "layer": "2-sql"
+  },
+  {
+   "id": "equity_analyst/analysis",
+   "lines": 2189,
+   "files": 6,
+   "language": "python",
+   "layer": "3-analyse"
+  },
+  {
+   "id": "equity_analyst/valuation",
+   "lines": 610,
+   "files": 2,
+   "language": "python",
+   "layer": "4-value"
+  },
+  {
+   "id": "equity_analyst/backtest.py",
+   "lines": 317,
+   "files": 1,
+   "language": "python",
+   "layer": "5-signal"
+  },
+  {
+   "id": "equity_analyst/strategies",
+   "lines": 642,
+   "files": 3,
+   "language": "python",
+   "layer": "5-signal"
+  },
+  {
+   "id": "equity_analyst/trading",
+   "lines": 269,
+   "files": 3,
+   "language": "python",
+   "layer": "5-signal"
+  },
+  {
+   "id": "equity_analyst/verification.py",
+   "lines": 345,
+   "files": 1,
+   "language": "python",
+   "layer": "6-verify"
+  },
+  {
+   "id": "equity_analyst/report",
+   "lines": 1964,
+   "files": 3,
+   "language": "python",
+   "layer": "7-report"
+  }
+ ],
+ "edges": [
+  {
+   "from": "equity_analyst/__init__.py",
+   "to": "equity_analyst/config.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/__init__.py",
+   "to": "equity_analyst/pipeline.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/backtest.py",
+   "to": "equity_analyst/analysis",
+   "weight": 2
+  },
+  {
+   "from": "equity_analyst/backtest.py",
+   "to": "equity_analyst/strategies",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/cli.py",
+   "to": "equity_analyst/config.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/cli.py",
+   "to": "equity_analyst/pipeline.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/cli.py",
+   "to": "equity_analyst/report",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/pipeline.py",
+   "to": "equity_analyst/analysis",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/pipeline.py",
+   "to": "equity_analyst/config.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/pipeline.py",
+   "to": "equity_analyst/db.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/pipeline.py",
+   "to": "equity_analyst/providers",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/pipeline.py",
+   "to": "equity_analyst/valuation",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/providers",
+   "to": "equity_analyst/db.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/trading",
+   "to": "equity_analyst/db.py",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/valuation",
+   "to": "equity_analyst/analysis",
+   "weight": 1
+  },
+  {
+   "from": "equity_analyst/verification.py",
+   "to": "equity_analyst/providers",
+   "weight": 1
+  }
+ ]
+}

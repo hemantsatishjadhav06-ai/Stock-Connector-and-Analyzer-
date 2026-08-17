@@ -302,3 +302,106 @@ Bands: ≥ 75% high, ≥ 55% moderate, below that low.
 **The score measures rigor, not conviction.** A high number means the analysis
 rests on complete, fresh, audited data whose models agree. It does not mean the
 stock will go up.
+
+---
+
+## §S Signals, backtesting and the paper book
+
+Merged from [`indian-stock-signal-ai`](https://github.com/hemantsatishjadhav06-ai/indian-stock-signal-ai)
+and reimplemented on the standard library. See
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for what came across and what did not.
+
+### Market regime
+
+Classified from the market's benchmark (`^NSEI` for India, `^GSPC` for the US,
+overridable with `--benchmark`):
+
+| Regime | Condition |
+|---|---|
+| bullish | price > 50DMA > 200DMA |
+| bearish | price < 50DMA < 200DMA |
+| range | moving averages intertwined |
+| volatile | ATR > 3.5%/day **or** a 5-day move beyond ±6% |
+
+**Volatility overrides direction.** A 6% weekly swing is its own regime whatever
+the moving averages say, because position sizing should react to it before
+trend-following does.
+
+When the benchmark cannot be fetched the regime is `unknown`, and `unknown`
+**gates every strategy off**. That is deliberate: a strategy library that fires
+without knowing the market state is worse than one that stays silent.
+
+### The 0-100 scores
+
+Two transparent heuristics, each point attributable to a named reason:
+
+* **Technical** — two archetypes. `trend_momentum` rewards price above the
+  200/50DMA, an EMA20>EMA50 stack, RSI 50-70, MACD above signal, ADX>20 with
+  +DI>-DI, and price above VWAP. `mean_reversion` rewards a long-term uptrend
+  with RSI<35, a tag of the lower Bollinger band, and ADX<20.
+* **Fundamental** — growth, profitability, leverage and cash generation banded
+  onto 0-100 and averaged. Below three sub-scores it is marked
+  `data_complete: false` and the report says the fundamental leg is thin.
+
+These are **tuning heuristics, not validated alpha**. They are scored, gated and
+then backtested precisely so a subscriber can see whether they pay.
+
+### Score fusion and gating
+
+```
+fused = w_tech·technical + w_fund·fundamental + w_regime·regime + w_news·sentiment
+```
+
+Weights come per strategy from `strategies.json`. The library's own rule
+governs the outcome:
+
+> Trade only when (a) the fused score clears the threshold **and** (b) all
+> required gates pass **and** (c) the risk model approves. Any single hard-gate
+> failure is no-trade regardless of score.
+
+Two consequences the code enforces:
+
+* A blocked setup is reported as `no_trade` **with the failing gate named**, not
+  hidden. Why a setup was rejected is as useful as the ones that passed.
+* An absent fundamental score fuses at a **neutral 50**, never 0 — missing data
+  must not read as bad data. The same applies to news sentiment, which has no
+  quantified feed wired in and says so rather than inventing one.
+
+### Backtesting
+
+Daily bars, one round-trip cost in basis points (default 30, covering
+brokerage + STT + exchange + GST + stamp + slippage).
+
+* **No look-ahead.** Indicators are recomputed on expanding prefixes so each bar
+  sees only what was available then; the entry decision and its fill both use
+  that same bar's close.
+* **Gap-aware fills.** A bar opening through the stop fills at the open, not at
+  the stop — which is what would actually have happened.
+* **Exits:** stop, target, trend break (close below 50DMA), reversion
+  (RSI > 55), or a time stop (40 bars trend / 15 bars mean-reversion).
+* **Intraday strategies are labelled.** S1-S4 need intraday bars; on daily bars
+  they are an approximation and every result says so.
+* The nine strategies collapse to two daily-bar rule sets, so one result is
+  reported per **archetype** rather than printing the same two results nine
+  times.
+
+Every backtest reports **excess over buy-and-hold**, and the report states
+plainly when a rule set underperformed it. A generated signal is not evidence
+that trading it pays; that is what the backtest is for, and a backtest is still
+the weakest evidence a strategy can offer.
+
+### Risk model and the paper book
+
+```
+shares = floor((equity × risk_per_trade%) / (entry − stop))
+```
+
+Capped by available equity (no leverage) and by the library's maximum
+concurrent positions. The risk manager is the **last** gate: a setup that clears
+every score and every strategy gate is still refused here if sizing breaches a
+cap, and every refusal carries a reason rather than a silent zero.
+
+The paper book is SQLite-backed and lives in the same database as the analysis.
+It is **paper only** — there is no broker adapter and no code path that could
+place a real order. A position with no current mark is held at cost and flagged
+`marked_at_cost`, never dropped from equity or marked to zero.
