@@ -159,3 +159,54 @@ def test_gaps_survive_when_nobody_supplies_the_domain():
     primary.note_gap("news", "unreachable")
     merged = merge_results(primary, ProviderResult(provider="yahoo"))
     assert "news" in merged.gaps
+
+
+def test_chart_rows_parse_ohlcv_and_skip_null_sessions():
+    """Yahoo returns nulls for halted or holiday sessions; a null close must be
+    dropped, not carried forward as a flat bar."""
+    from equity_analyst.providers.yahoo import _parse_chart_rows
+
+    result = {
+        "timestamp": [1704067200, 1704153600, 1704240000],
+        "indicators": {
+            "quote": [{
+                "open": [10.0, None, 12.0],
+                "high": [11.0, None, 13.0],
+                "low": [9.5, None, 11.5],
+                "close": [10.5, None, 12.5],
+                "volume": [1000, None, 2000],
+            }],
+            "adjclose": [{"adjclose": [10.4, None, 12.4]}],
+        },
+    }
+    rows = _parse_chart_rows("T", result, "yahoo", "now")
+    assert len(rows) == 2
+    assert rows[0]["close"] == 10.5
+    assert rows[0]["adj_close"] == 10.4
+    assert rows[1]["date"] > rows[0]["date"]
+
+
+def test_chart_rows_handle_a_missing_adjclose_block():
+    from equity_analyst.providers.yahoo import _parse_chart_rows
+
+    result = {
+        "timestamp": [1704067200],
+        "indicators": {"quote": [{"close": [10.5], "open": [10.0]}]},
+    }
+    rows = _parse_chart_rows("T", result, "yahoo", "now")
+    assert rows[0]["adj_close"] == 10.5
+
+
+def test_retry_after_header_is_respected():
+    import urllib.error
+
+    from equity_analyst.providers.base import _retry_after_seconds
+
+    def err(value):
+        return urllib.error.HTTPError(
+            "u", 429, "Too Many Requests", {"Retry-After": value}, None
+        )
+
+    assert _retry_after_seconds(err("30"), 2.0) == 30.0
+    # HTTP-date form is legal but not worth parsing; fall back to our backoff.
+    assert _retry_after_seconds(err("Wed, 21 Oct 2026 07:28:00 GMT"), 2.0) == 2.0

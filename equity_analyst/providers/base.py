@@ -62,6 +62,7 @@ def http_get(
 
     last: Optional[Exception] = None
     for attempt in range(retries):
+        wait = backoff * (2 ** attempt)
         try:
             req = urllib.request.Request(url, headers=hdrs)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -73,11 +74,29 @@ def http_get(
             last = exc
             if exc.code not in (429, 500, 502, 503, 504):
                 raise FetchError(f"HTTP {exc.code} for {url}") from exc
+            # Respect the server's own pacing when it tells us one. Public
+            # finance endpoints throttle by IP, and a shared egress address
+            # gets 429s that a fixed backoff would keep walking into.
+            wait = max(wait, _retry_after_seconds(exc, wait))
         except Exception as exc:  # transport / TLS / timeout
             last = exc
         if attempt < retries - 1:
-            time.sleep(backoff * (2 ** attempt))
+            time.sleep(min(wait, 30.0))
     raise FetchError(f"unreachable after {retries} attempts: {url} ({last})")
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError, default: float) -> float:
+    header = None
+    try:
+        header = exc.headers.get("Retry-After")
+    except Exception:
+        return default
+    if not header:
+        return default
+    try:
+        return float(header)          # delta-seconds form
+    except (TypeError, ValueError):
+        return default                # HTTP-date form: fall back to our backoff
 
 
 def http_get_json(url: str, **kw: Any) -> Any:

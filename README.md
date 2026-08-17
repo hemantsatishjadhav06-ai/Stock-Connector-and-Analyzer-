@@ -150,12 +150,19 @@ aggressively. A run that loses its price feed still produces a valuation from
 the screener's fundamentals — it simply reports a lower confidence, publishes no
 technical bias, and lists the gap.
 
+**If Yahoo returns 429 for you**, you are sharing an egress IP with other
+traffic (common on CI runners, containers and VPNs). The client already backs
+off exponentially and honours `Retry-After`. Options: run from a different
+network, install OpenBB and configure a keyed provider
+(`pip install -e '.[openbb]'`), or capture one good pull with `--save-bundle`
+and iterate offline against it.
+
 ---
 
 ## Development
 
 ```bash
-python3 -m pytest tests/ -q          # 97 tests, no network required
+python3 -m pytest tests/ -q          # 100 tests, no network required
 python3 tools/make_sample_bundle.py  # regenerate the synthetic fixture
 ```
 
