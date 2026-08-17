@@ -17,6 +17,12 @@ from __future__ import annotations
 from typing import Any, List
 
 from .base import Provider, ProviderResult, merge_results
+from .market_data import (
+    AlpacaProvider,
+    IndianAPIProvider,
+    TwelveDataProvider,
+    fetch_benchmark_history,
+)
 from .offline import OfflineProvider, result_to_bundle, save_bundle
 from .openbb_provider import OpenBBProvider, openbb_available
 from .screener_in import ScreenerInProvider
@@ -26,6 +32,10 @@ __all__ = [
     "Provider",
     "ProviderResult",
     "merge_results",
+    "AlpacaProvider",
+    "IndianAPIProvider",
+    "TwelveDataProvider",
+    "fetch_benchmark_history",
     "OfflineProvider",
     "OpenBBProvider",
     "ScreenerInProvider",
@@ -39,7 +49,14 @@ __all__ = [
 
 
 def build_chain(config: Any) -> List[Provider]:
-    """Ordered providers for this run. Highest-authority source first."""
+    """Ordered providers for this run. Highest-authority source first.
+
+    Statement quality decides the order, then price coverage. The keyed
+    providers sit *after* the free ones for statements but are what keep the
+    price series alive when a shared IP gets rate-limited, which is why they
+    join the chain whenever a key is present rather than only on failure —
+    first-supplier-wins merging means adding them can only fill gaps.
+    """
     from ..config import market_is_india
 
     if getattr(config, "offline_file", None):
@@ -47,14 +64,30 @@ def build_chain(config: Any) -> List[Provider]:
     if not getattr(config, "allow_network", True):
         return []
 
+    market = getattr(config, "market", "")
+    settings = getattr(config, "data", None)
     chain: List[Provider] = []
-    if market_is_india(getattr(config, "market", "")):
-        chain.append(ScreenerInProvider())
-        chain.append(YahooProvider())
+
+    if market_is_india(market):
+        chain.append(ScreenerInProvider())      # audited filings, INR crore
+        chain.append(YahooProvider())           # price series for .NS/.BO
     else:
         if openbb_available():
             chain.append(OpenBBProvider())
         chain.append(YahooProvider())
+
+    if settings is not None:
+        if getattr(settings, "twelvedata_api_key", ""):
+            chain.append(TwelveDataProvider(settings.twelvedata_api_key))
+        if getattr(settings, "alpaca_key_id", "") and getattr(settings, "alpaca_secret_key", ""):
+            alpaca = AlpacaProvider(
+                settings.alpaca_key_id, settings.alpaca_secret_key, settings.alpaca_base_url
+            )
+            if alpaca.supports(market):
+                chain.append(alpaca)
+        if getattr(settings, "indian_api_base_url", "") and market_is_india(market):
+            chain.append(IndianAPIProvider(settings.indian_api_base_url))
+
     return chain
 
 

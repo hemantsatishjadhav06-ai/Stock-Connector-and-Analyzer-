@@ -32,3 +32,18 @@ def report(sample_path):
         commodities=["CL=F"],
     )
     return run(config)
+
+
+@pytest.fixture(scope="session")
+def report_signals(sample_path):
+    """A full offline run with §S signals and backtest enabled."""
+    config = RunConfig(
+        ticker="DEMO.SYNTH",
+        market="US",
+        offline_file=sample_path,
+        allow_network=False,
+        commodities=["CL=F"],
+        with_signals=True,
+        with_backtest=True,
+    )
+    return run(config)

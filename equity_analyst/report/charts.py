@@ -812,3 +812,170 @@ def commodity_scatter(link: Any, annual: List[Dict[str, Any]]) -> str:
         f"actually saw.{slope_note}",
         table,
     )
+
+
+# =====================================================================
+# 7. Strategy fused scores vs the trade threshold  (§S)
+# =====================================================================
+
+
+def signal_scores(signals: Any, threshold: float) -> str:
+    title = "Strategy scores vs the trade threshold"
+    rows = list(getattr(signals, "signals", []) or [])
+    if not rows:
+        return _empty(title, "no strategy signals were generated")
+
+    head, row_h, gap, bar_h = 26, 26, 10, 15
+    height = head + len(rows) * (row_h + gap) + 40
+    # Labels are right-anchored at x0, so x0 must exceed the widest label or the
+    # text runs off the left edge of the viewBox (SVG overflow is visible).
+    x0, x1 = 268, W - PAD_R
+    label_chars = 30
+    hi = 100.0
+
+    def x_of(v: float) -> float:
+        return x0 + (v / hi) * (x1 - x0)
+
+    plot_bottom = head + len(rows) * (row_h + gap) - gap + 4
+    parts = []
+    for t in (0, 25, 50, 75, 100):
+        x = x_of(t)
+        parts.append(
+            f'<line class="grid" x1="{x:.1f}" y1="{head - 8}" x2="{x:.1f}" y2="{plot_bottom:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="tick" x="{x:.1f}" y="{plot_bottom + 17:.1f}" text-anchor="middle">{t}</text>'
+        )
+
+    for i, s in enumerate(rows):
+        y = head + i * (row_h + gap)
+        # Actionable vs blocked is a *state*, so it takes a status colour and
+        # is also carried by the ▶/· glyph -- never by hue alone.
+        fill = "var(--status-good)" if s.actionable else "var(--series-1)"
+        name = s.strategy
+        if len(name) > label_chars:
+            name = name[: label_chars - 1].rstrip() + "…"
+        label = f"{'▶' if s.actionable else '·'} {s.strategy_id} {name}"
+        parts.append(
+            f'<text class="ffname" x="{x0 - 12}" y="{y + bar_h / 2 + 4:.1f}" '
+            f'text-anchor="end">{esc(label)}<title>{esc(s.strategy)}</title></text>'
+        )
+        blocked = ("; ".join(s.gate_failures)) if s.gate_failures else "all gates pass"
+        parts.append(
+            f'<rect class="bar" x="{x_of(0):.1f}" y="{y:.1f}" '
+            f'width="{max(2.0, x_of(s.fused_score) - x_of(0)):.1f}" height="{bar_h}" '
+            f'rx="4" fill="{fill}"><title>{esc(s.strategy)} · fused {s.fused_score} '
+            f"(technical {s.technical_score}, fundamental {s.fundamental_score}) · "
+            f"{esc(blocked)}</title></rect>"
+        )
+        parts.append(
+            f'<text class="dlabel" x="{x_of(s.fused_score) + 8:.1f}" '
+            f'y="{y + bar_h / 2 + 4:.1f}">{s.fused_score:.0f}</text>'
+        )
+
+    tx = x_of(threshold)
+    parts.append(
+        f'<line class="threshold" x1="{tx:.1f}" y1="{head - 8}" x2="{tx:.1f}" '
+        f'y2="{plot_bottom:.1f}"/>'
+    )
+    parts.append(
+        f'<text class="thresholdlabel" x="{tx:.1f}" y="{head - 13}" text-anchor="middle">'
+        f"trade threshold {threshold:.0f}</text>"
+    )
+
+    svg = (
+        f'<svg viewBox="0 0 {W} {height}" role="img" aria-label="Fused score per '
+        f'strategy against the trade threshold">' + "".join(parts) + "</svg>"
+    )
+    table = _table_view(
+        ["Strategy", "Fused", "Technical", "Fundamental", "Regime fit", "Status"],
+        [
+            [f"{s.strategy_id} {s.strategy}", f"{s.fused_score:.1f}",
+             f"{s.technical_score:.1f}", f"{s.fundamental_score:.1f}",
+             "yes" if s.regime_fit else "no",
+             "actionable" if s.actionable else ("; ".join(s.gate_failures) or "below threshold")]
+            for s in rows
+        ],
+    )
+    return _figure(
+        title, svg,
+        "A bar past the threshold is still no-trade if any hard gate failed — "
+        "score and gates are independent, and the blocking gate is named.",
+        table,
+    )
+
+
+# =====================================================================
+# 8. Backtest equity curve vs buy-and-hold  (§S)
+# =====================================================================
+
+
+def equity_curve(result: Any, currency: str) -> str:
+    title = f"Backtest — {getattr(result, 'archetype', '')} vs buy-and-hold"
+    curve = list(getattr(result, "equity_curve", []) or [])
+    if not getattr(result, "ok", False) or len(curve) < 5:
+        return _empty(title, getattr(result, "error", None) or "no backtest curve")
+
+    height = 300
+    x1, y1 = W - PAD_R, height - PAD_B
+    n = len(curve)
+    strat = [p["strategy"] for p in curve]
+    hold = [p["buy_hold"] for p in curve]
+
+    def x_of(i: float) -> float:
+        return PAD_L + (x1 - PAD_L) * (i / max(1, n - 1))
+
+    lo, hi = _bounds(strat + hold, include_zero=False)
+
+    def y_of(v: float) -> float:
+        return y1 - (v - lo) / (hi - lo) * (y1 - PAD_T)
+
+    parts = [_grid_and_axis(PAD_L, x1, y_of, _nice_ticks(lo, hi, 5))]
+    # Both series are account equity in the same currency -- one axis, honestly.
+    for values, var in ((hold, "--series-3"), (strat, "--series-1")):
+        d = "M" + " L".join(f"{x_of(i):.1f},{y_of(v):.1f}" for i, v in enumerate(values))
+        parts.append(f'<path class="line" d="{d}" stroke="var({var})"/>')
+
+    for values, var, name in ((hold, "--series-3", "Buy & hold"), (strat, "--series-1", "Strategy")):
+        parts.append(
+            f'<circle class="dot" cx="{x_of(n - 1):.1f}" cy="{y_of(values[-1]):.1f}" '
+            f'r="5" fill="var({var})"><title>{name}: {esc(fmt(values[-1], 0))} '
+            f"{esc(currency)}</title></circle>"
+        )
+    parts.append(
+        f'<text class="dlabel" x="{x_of(n - 1) - 8:.1f}" y="{y_of(strat[-1]) - 10:.1f}" '
+        f'text-anchor="end">strategy {esc(fmt(strat[-1], 0))}</text>'
+    )
+    parts.append(
+        f'<text class="dlabel" x="{x_of(n - 1) - 8:.1f}" y="{y_of(hold[-1]) + 16:.1f}" '
+        f'text-anchor="end">buy &amp; hold {esc(fmt(hold[-1], 0))}</text>'
+    )
+    parts.append(f'<text class="axtitle" x="{PAD_L}" y="{PAD_T - 6}">Account equity ({esc(currency)})</text>')
+
+    step = max(1, n // 8)
+    for i in range(0, n, step):
+        parts.append(
+            f'<text class="tick" x="{x_of(i):.1f}" y="{height - PAD_B + 18}" '
+            f'text-anchor="middle">{esc(curve[i]["date"][:7])}</text>'
+        )
+
+    svg = (
+        f'<svg viewBox="0 0 {W} {height}" role="img" aria-label="Strategy equity '
+        f'curve against buy and hold">' + "".join(parts) + "</svg>"
+    )
+    legend = _legend([("Strategy", "--series-1"), ("Buy & hold", "--series-3")])
+    trades = list(getattr(result, "trades", []) or [])[-15:]
+    table = _table_view(
+        ["Entry", "Exit", "Entry px", "Exit px", "Return %", "Bars", "Exit reason"],
+        [[t.entry_date, t.exit_date, fmt(t.entry, 2), fmt(t.exit, 2),
+          f"{t.return_pct:+.2f}", str(t.bars_held), t.reason] for t in trades],
+        "table view (last 15 trades)",
+    )
+    m = getattr(result, "metrics", {}) or {}
+    note = (
+        f"Costs charged at {m.get('round_trip_bps', 0):.0f} bps per round trip. "
+        f"Stops and targets fill gap-aware against each bar's high/low."
+    )
+    if getattr(result, "intraday_approximation", False):
+        note += " Intraday strategy approximated on daily bars."
+    return _figure(title, legend + svg, note, table)

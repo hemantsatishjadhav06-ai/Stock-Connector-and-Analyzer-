@@ -37,6 +37,33 @@ class FetchError(RuntimeError):
     """Raised inside a provider; callers convert it into a coverage gap."""
 
 
+def _cffi_session():
+    """A TLS-impersonating session, when `curl_cffi` is installed.
+
+    Yahoo throttles datacenter IPs by TLS fingerprint as well as by address, so
+    a session that impersonates Chrome often restores access where plain urllib
+    gets a 429 — this is `indian-stock-signal-ai`'s fix and it is worth having.
+
+    It is strictly optional and strictly best-effort: some networks (notably a
+    TLS-inspecting corporate or agent proxy) reset impersonated handshakes, so a
+    failure here silently falls back to urllib rather than failing the fetch.
+    """
+    global _CFFI
+    if _CFFI is not _UNSET:
+        return _CFFI
+    try:
+        from curl_cffi import requests as _cffi_requests
+
+        _CFFI = _cffi_requests.Session(impersonate="chrome")
+    except Exception:
+        _CFFI = None
+    return _CFFI
+
+
+_UNSET = object()
+_CFFI: Any = _UNSET
+
+
 def http_get(
     url: str,
     *,
@@ -74,6 +101,11 @@ def http_get(
             last = exc
             if exc.code not in (429, 500, 502, 503, 504):
                 raise FetchError(f"HTTP {exc.code} for {url}") from exc
+            # A 429 is often a TLS-fingerprint block rather than true rate
+            # limiting. Try the impersonating session once before backing off.
+            impersonated = _try_cffi(url, hdrs, timeout)
+            if impersonated is not None:
+                return impersonated
             # Respect the server's own pacing when it tells us one. Public
             # finance endpoints throttle by IP, and a shared egress address
             # gets 429s that a fixed backoff would keep walking into.
@@ -83,6 +115,20 @@ def http_get(
         if attempt < retries - 1:
             time.sleep(min(wait, 30.0))
     raise FetchError(f"unreachable after {retries} attempts: {url} ({last})")
+
+
+def _try_cffi(url: str, headers: Dict[str, str], timeout: int) -> Optional[bytes]:
+    """One impersonated attempt. Returns None on any failure, never raises."""
+    session = _cffi_session()
+    if session is None:
+        return None
+    try:
+        resp = session.get(url, headers=headers, timeout=timeout)
+        if getattr(resp, "status_code", 0) == 200:
+            return resp.content
+    except Exception:
+        return None
+    return None
 
 
 def _retry_after_seconds(exc: urllib.error.HTTPError, default: float) -> float:

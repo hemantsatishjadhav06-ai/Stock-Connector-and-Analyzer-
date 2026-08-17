@@ -433,3 +433,115 @@ LEFT JOIN price_daily px
        ON px.ticker = a.ticker
       AND px.date = (SELECT MAX(p2.date) FROM price_daily p2
                       WHERE p2.ticker = a.ticker AND p2.date <= a.period_end);
+
+-- =====================================================================
+-- §S SIGNALS, BACKTESTS AND THE PAPER BOOK
+-- ---------------------------------------------------------------------
+-- Ported from indian-stock-signal-ai. These live in the same database as
+-- the fundamental analysis so a signal can be joined back to the
+-- valuation and forensic work that shares its ticker.
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS market_regime (
+    run_id      TEXT NOT NULL,
+    benchmark   TEXT NOT NULL,
+    as_of       TEXT,
+    regime      TEXT,           -- bullish | bearish | range | volatile | unknown
+    confidence  REAL,
+    atr_pct     REAL,
+    drivers     TEXT,           -- newline-joined
+    PRIMARY KEY (run_id, benchmark)
+);
+
+CREATE TABLE IF NOT EXISTS signal (
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    strategy_id         TEXT NOT NULL,
+    strategy            TEXT,
+    category            TEXT,
+    archetype           TEXT,
+    bias                TEXT,   -- long | no_trade
+    fused_score         REAL,
+    technical_score     REAL,
+    fundamental_score   REAL,
+    regime_score        REAL,
+    regime_fit          INTEGER,
+    entry               REAL,
+    stop                REAL,
+    target              REAL,
+    reward_risk         REAL,
+    technical_reasons   TEXT,
+    gate_failures       TEXT,
+    intraday_approx     INTEGER DEFAULT 0,
+    as_of               TEXT,
+    PRIMARY KEY (run_id, ticker, strategy_id)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_result (
+    run_id                  TEXT NOT NULL,
+    ticker                  TEXT NOT NULL,
+    strategy_id             TEXT NOT NULL,
+    archetype               TEXT,
+    period_from             TEXT,
+    period_to               TEXT,
+    trades                  INTEGER,
+    win_rate_pct            REAL,
+    expectancy_pct          REAL,
+    profit_factor           REAL,
+    total_return_pct        REAL,
+    cagr_pct                REAL,
+    max_drawdown_pct        REAL,
+    sharpe                  REAL,
+    exposure_pct            REAL,
+    buy_hold_pct            REAL,
+    excess_vs_buy_hold_pct  REAL,
+    round_trip_bps          REAL,
+    intraday_approx         INTEGER DEFAULT 0,
+    error                   TEXT,
+    PRIMARY KEY (run_id, ticker, strategy_id)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_trade (
+    run_id       TEXT NOT NULL,
+    ticker       TEXT NOT NULL,
+    strategy_id  TEXT NOT NULL,
+    entry_date   TEXT,
+    exit_date    TEXT,
+    entry        REAL,
+    exit         REAL,
+    return_pct   REAL,
+    bars_held    INTEGER,
+    reason       TEXT
+);
+
+-- Paper book. Deliberately not keyed to a run: the book persists across
+-- analyses, which is the whole point of paper-trading a strategy.
+CREATE TABLE IF NOT EXISTS paper_account (
+    id              INTEGER PRIMARY KEY,
+    cash            REAL NOT NULL DEFAULT 0,
+    starting_cash   REAL NOT NULL DEFAULT 0,
+    created_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS paper_position (
+    ticker      TEXT PRIMARY KEY,
+    qty         REAL NOT NULL DEFAULT 0,
+    avg_price   REAL NOT NULL DEFAULT 0,
+    strategy    TEXT,
+    opened_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS paper_order (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    qty           REAL NOT NULL,
+    price         REAL NOT NULL,
+    strategy      TEXT,
+    status        TEXT DEFAULT 'filled',
+    realized_pnl  REAL DEFAULT 0,
+    created_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_score ON signal(run_id, fused_score DESC);
+CREATE INDEX IF NOT EXISTS idx_bt_trade ON backtest_trade(run_id, ticker, strategy_id);

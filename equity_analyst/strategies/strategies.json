@@ -1,0 +1,367 @@
+{
+  "schema_version": "1.0",
+  "generated_for": "Stock Market AI Strategy Builder (OpenBB + Claude + Render + GitHub)",
+  "description": "Distinct trading strategies. Each strategy separates a FUNDAMENTAL block from a TECHNICAL block, then defines entry, stop, target, risk, regime fit, and score-fusion weights so the agent pipeline and backtester can consume it directly.",
+  "conventions": {
+    "all_numeric_thresholds": "Default values only - tune per market/instrument during backtest. Never hard-code as truth.",
+    "ATR": "Average True Range on the signal timeframe unless noted.",
+    "RVOL": "Relative volume vs the same-time-of-day average over a trailing window (default 20 days).",
+    "R": "1R = the distance from entry to stop = the dollar risk on the trade.",
+    "VWAP": "Session-anchored volume weighted average price (intraday) or earnings-anchored VWAP where noted.",
+    "score_0_100": "Each agent emits 0-100; the Strategy Builder fuses them with the per-strategy weights below."
+  },
+  "global_risk_model": {
+    "risk_per_trade_pct": 0.5,
+    "risk_per_trade_pct_range": [0.25, 1.0],
+    "max_daily_loss_pct": 3.0,
+    "max_open_positions": 5,
+    "max_sector_exposure_pct": 30,
+    "max_correlated_positions": 2,
+    "position_size_formula_long": "shares = floor((equity * risk_per_trade_pct/100) / (entry_price - stop_price))",
+    "position_size_formula_short": "shares = floor((equity * risk_per_trade_pct/100) / (stop_price - entry_price))",
+    "min_reward_to_risk": 1.5,
+    "hard_kill_switch": true,
+    "execution_default": "paper_trade",
+    "pdt_rule_note": "US margin day trading under $25k equity is capped at 3 day-trades / 5 business days. The risk agent must enforce this before any intraday signal is sent live."
+  },
+  "score_fusion": {
+    "agents": ["regime", "sector", "fundamental", "valuation", "news_sentiment", "technical", "smc"],
+    "method": "weighted_sum",
+    "min_total_score_to_trade": 65,
+    "rule": "Trade only when (a) total fused score >= threshold AND (b) the strategy's required_gates all pass AND (c) risk agent approves. Any single hard-gate failure = no_trade regardless of score."
+  },
+  "regimes": ["bullish", "bearish", "range", "volatile", "event_risk"],
+  "strategies": [
+    {
+      "id": "S1",
+      "name": "Opening Range Breakout (ORB)",
+      "category": "Intraday momentum / breakout",
+      "signal_timeframe": "1m / 5m",
+      "context_timeframe": "15m, daily",
+      "holding_period": "minutes to hours, flat by close",
+      "best_regimes": ["bullish", "volatile"],
+      "avoid_regimes": ["range"],
+      "fundamental_block": {
+        "purpose": "Make sure the mover is liquid, catalyst-backed, and free of landmines.",
+        "filters": {
+          "avg_daily_dollar_volume_min_usd": 20000000,
+          "catalyst_required": true,
+          "catalyst_quality": "real news/earnings/upgrade, not rumor",
+          "earnings_within_session": "avoid unless explicitly trading the catalyst",
+          "float_note": "small-cap momentum: prefer float < 50M for sharper moves; large-cap: prioritize liquidity over float",
+          "spread_max_bps": 15
+        }
+      },
+      "technical_block": {
+        "opening_range": "high/low of first 5 (or 15) minutes",
+        "required_conditions": [
+          "price above session VWAP",
+          "EMA9 > EMA20 on 1m (up-stack)",
+          "RSI(14,1m) > 55",
+          "RVOL > 2.0 at the breakout"
+        ],
+        "entry_trigger": "1m close above opening-range high (long) with volume expansion",
+        "stop_logic": "below opening-range low or below VWAP, ~1.0 x ATR(14,1m)",
+        "target_logic": "scale 1R and 2R; trail remainder under EMA9 / VWAP; hard time-stop at session close",
+        "min_reward_to_risk": 1.5
+      },
+      "score_weights": {"technical": 0.55, "regime": 0.20, "news_sentiment": 0.15, "fundamental": 0.10},
+      "required_gates": ["price_above_VWAP", "RVOL_gt_2", "regime_not_range"],
+      "skip_rules": ["low RVOL", "price inside opening range", "price below VWAP", "wide spread"]
+    },
+    {
+      "id": "S2",
+      "name": "VWAP Trend Pullback (intraday continuation)",
+      "category": "Intraday trend continuation",
+      "signal_timeframe": "1m / 5m",
+      "context_timeframe": "15m, daily",
+      "holding_period": "minutes to hours, flat by close",
+      "best_regimes": ["bullish"],
+      "avoid_regimes": ["volatile", "event_risk"],
+      "fundamental_block": {
+        "purpose": "Trade continuation only in liquid names inside a supportive sector.",
+        "filters": {
+          "avg_daily_dollar_volume_min_usd": 20000000,
+          "sector_in_favor": true,
+          "earnings_within_session": "avoid",
+          "catalyst_required": false
+        }
+      },
+      "technical_block": {
+        "trend_definition": "price above rising VWAP; EMA9 > EMA20 > EMA50 on 1m; higher-highs / higher-lows",
+        "pullback_zone": "VWAP, EMA20, or prior breakout level",
+        "required_conditions": [
+          "bullish reversal candle at support (hammer / bullish engulfing)",
+          "RSI(14,1m) bounces from 40-50 (not deeply oversold)",
+          "volume picks up on the bounce"
+        ],
+        "entry_trigger": "break of the pullback candle high in trend direction",
+        "stop_logic": "below pullback swing low / below VWAP, ~1.0 x ATR(14,1m)",
+        "target_logic": "prior intraday high, then trail; ~2R typical",
+        "min_reward_to_risk": 1.5
+      },
+      "score_weights": {"technical": 0.60, "regime": 0.25, "fundamental": 0.10, "news_sentiment": 0.05},
+      "required_gates": ["intraday_uptrend_confirmed", "pullback_to_support", "regime_bullish"],
+      "skip_rules": ["trend broken (price below VWAP)", "no clean support touch", "RSI still falling"]
+    },
+    {
+      "id": "S3",
+      "name": "Liquidity Sweep Reversal (Smart Money Concepts)",
+      "category": "Intraday reversal / SMC",
+      "signal_timeframe": "1m / 5m",
+      "context_timeframe": "15m, daily levels",
+      "holding_period": "minutes to hours",
+      "best_regimes": ["range", "volatile"],
+      "avoid_regimes": ["bullish", "bearish"],
+      "fundamental_block": {
+        "purpose": "Counter-trend mean reversion - avoid names with a fresh one-way catalyst.",
+        "filters": {
+          "avg_daily_dollar_volume_min_usd": 20000000,
+          "fresh_hard_catalyst": "avoid (a strong catalyst keeps trending against the fade)",
+          "earnings_within_session": "avoid"
+        }
+      },
+      "technical_block": {
+        "liquidity_pools": "equal highs/lows, prior-day high/low, session high/low",
+        "sequence": [
+          "liquidity sweep: price spikes through the level then rejects (stop hunt)",
+          "Change of Character (CHoCH): break of the most recent minor structure in the new direction",
+          "entry zone: retrace into Fair Value Gap (FVG) or order block left by the impulse"
+        ],
+        "entry_trigger": "rejection candle inside FVG/order block after CHoCH",
+        "stop_logic": "just beyond the sweep extreme (past the wick)",
+        "target_logic": "opposing liquidity pool / first FVG fill; 2-3R because stop is tight",
+        "min_reward_to_risk": 2.0
+      },
+      "score_weights": {"technical": 0.70, "regime": 0.20, "news_sentiment": 0.05, "fundamental": 0.05},
+      "required_gates": ["liquidity_sweep_confirmed", "CHoCH_confirmed", "regime_range_or_volatile"],
+      "skip_rules": ["no clean liquidity level", "structure unclear", "strong trend day (fade fails)"]
+    },
+    {
+      "id": "S4",
+      "name": "Momentum Continuation - Flag / Pennant Breakout",
+      "category": "Intraday momentum",
+      "signal_timeframe": "1m / 5m",
+      "context_timeframe": "15m, daily",
+      "holding_period": "minutes to hours",
+      "best_regimes": ["bullish", "volatile"],
+      "avoid_regimes": ["range"],
+      "fundamental_block": {
+        "purpose": "Ride a catalyst-driven mover during a controlled pause.",
+        "filters": {
+          "catalyst_required": true,
+          "rvol_context": "day's RVOL elevated (>3 preferred)",
+          "avg_daily_dollar_volume_min_usd": 15000000,
+          "float_note": "lower float amplifies the measured move but raises slippage risk"
+        }
+      },
+      "technical_block": {
+        "pattern": "strong impulse leg (pole) -> tight consolidation (flag) on declining volume",
+        "required_conditions": ["price above VWAP", "EMA9 > EMA20 up-stack", "flag slopes flat/down against the trend"],
+        "entry_trigger": "break of flag high with a fresh volume surge",
+        "stop_logic": "below flag low",
+        "target_logic": "measured move = pole height projected from breakout; scale out, trail EMA9",
+        "min_reward_to_risk": 2.0
+      },
+      "score_weights": {"technical": 0.60, "news_sentiment": 0.20, "regime": 0.15, "fundamental": 0.05},
+      "required_gates": ["valid_flag", "volume_surge_on_break", "above_VWAP"],
+      "skip_rules": ["volume rising during flag (distribution)", "flag too deep (>50% of pole)", "below VWAP"]
+    },
+    {
+      "id": "S5",
+      "name": "Quality-Growth Momentum Swing (CAN SLIM-style base breakout)",
+      "category": "Swing / position - growth leader",
+      "signal_timeframe": "daily",
+      "context_timeframe": "weekly",
+      "holding_period": "weeks to months",
+      "best_regimes": ["bullish"],
+      "avoid_regimes": ["bearish", "event_risk"],
+      "fundamental_block": {
+        "purpose": "Buy fundamentally elite leaders breaking out of sound bases.",
+        "filters": {
+          "eps_growth_qoq_yoy_pct_min": 20,
+          "annual_eps_growth_pct_min": 20,
+          "sales_growth_pct_min": 20,
+          "roe_pct_min": 15,
+          "debt_to_equity_max": 1.0,
+          "free_cash_flow_positive": true,
+          "earnings_quality": "accruals not inflating reported earnings",
+          "institutional_sponsorship": "increasing",
+          "industry_group_strength": "top quartile / market leader"
+        }
+      },
+      "technical_block": {
+        "stage": "Stage 2 uptrend: price above rising 50DMA and 200DMA, 50DMA > 200DMA",
+        "base_pattern": "cup-with-handle / flat base / VCP (volatility contraction)",
+        "required_conditions": [
+          "relative-strength line at or near new high",
+          "not extended (< ~5% above pivot at entry)"
+        ],
+        "entry_trigger": "breakout through base pivot on volume > 40-50% above average",
+        "stop_logic": "7-8% below entry, or below base low (~1.5-2 x ATR daily)",
+        "target_logic": "hold the trend; trim 20-25% gains or on a high-volume break of the 50DMA / climax top",
+        "min_reward_to_risk": 2.0
+      },
+      "score_weights": {"fundamental": 0.45, "technical": 0.35, "regime": 0.15, "news_sentiment": 0.05},
+      "required_gates": ["market_in_confirmed_uptrend", "fundamentals_pass", "valid_base_breakout"],
+      "skip_rules": ["market in correction", "breakout on weak volume", "extended entry", "deteriorating fundamentals"]
+    },
+    {
+      "id": "S6",
+      "name": "Value Pullback in Uptrend (quality at a discount)",
+      "category": "Swing - value / mean reversion",
+      "signal_timeframe": "daily",
+      "context_timeframe": "weekly",
+      "holding_period": "weeks to months",
+      "best_regimes": ["bullish", "range"],
+      "avoid_regimes": ["bearish"],
+      "fundamental_block": {
+        "purpose": "Buy durable, cheap-quality businesses on technical weakness with a margin of safety.",
+        "filters": {
+          "forward_pe_vs_5yr_median": "below",
+          "forward_pe_vs_peer_median": "below",
+          "peg_max": 1.5,
+          "roic_gt_wacc_proxy": true,
+          "free_cash_flow_trend": "stable or growing",
+          "leverage": "manageable (interest coverage healthy)",
+          "margin_of_safety": "price below DCF/intrinsic fair value estimate"
+        }
+      },
+      "technical_block": {
+        "trend_definition": "long-term uptrend intact (above 200DMA)",
+        "pullback_zone": "50DMA, prior breakout level, or 38-50% Fibonacci retrace",
+        "required_conditions": [
+          "RSI(14,daily) in 30-40 and turning up",
+          "bullish reversal candle / reclaim of support",
+          "optional bullish RSI divergence"
+        ],
+        "entry_trigger": "reclaim of support or confirmed reversal candle",
+        "stop_logic": "below support / below 200DMA, ~2 x ATR daily",
+        "target_logic": "prior high or fair-value estimate; trim at 1.5R, trail the rest",
+        "min_reward_to_risk": 1.8
+      },
+      "score_weights": {"fundamental": 0.50, "technical": 0.30, "regime": 0.15, "news_sentiment": 0.05},
+      "required_gates": ["uptrend_intact", "valuation_cheap_vs_history_and_peers", "support_reversal_confirmed"],
+      "skip_rules": ["falling knife (200DMA broken)", "valuation cheap for a reason (broken thesis)", "no reversal yet"]
+    },
+    {
+      "id": "S7",
+      "name": "Earnings Catalyst / Post-Earnings Drift (PEAD)",
+      "category": "Event-driven swing",
+      "signal_timeframe": "daily",
+      "context_timeframe": "60m, weekly",
+      "holding_period": "days to weeks",
+      "best_regimes": ["bullish", "range"],
+      "avoid_regimes": ["event_risk"],
+      "fundamental_block": {
+        "purpose": "Exploit underreaction to a genuine positive earnings surprise.",
+        "filters": {
+          "eps_surprise_pct_min": 5,
+          "revenue_beat": true,
+          "guidance": "raised / positive",
+          "estimate_revisions_post_print": "upward",
+          "beat_quality": "organic, margin-supported, not one-off"
+        }
+      },
+      "technical_block": {
+        "post_print_structure": "gap up holding above the pre-earnings range and above VWAP",
+        "required_conditions": [
+          "volume surge on the gap day",
+          "price consolidates above the gap (gap not filled)"
+        ],
+        "entry_trigger": "break of day-1 high, or first pullback that holds the gap",
+        "stop_logic": "below the gap / below day-1 low",
+        "target_logic": "ride the drift; trail under rising EMA20 or earnings-anchored VWAP",
+        "min_reward_to_risk": 1.8
+      },
+      "score_weights": {"fundamental": 0.40, "technical": 0.30, "news_sentiment": 0.20, "regime": 0.10},
+      "required_gates": ["positive_surprise_confirmed", "gap_holds_above_range", "upward_revisions"],
+      "skip_rules": ["gap fills / fails", "beat already priced in (sell-the-news)", "downward revisions"]
+    },
+    {
+      "id": "S8",
+      "name": "Sector Rotation Relative Strength (top-down)",
+      "category": "Swing / position - macro rotation",
+      "signal_timeframe": "daily / weekly",
+      "context_timeframe": "weekly, monthly",
+      "holding_period": "weeks to months",
+      "best_regimes": ["bullish", "range", "bearish"],
+      "avoid_regimes": [],
+      "fundamental_block": {
+        "purpose": "Tilt capital toward sectors the macro backdrop and earnings breadth favor.",
+        "filters": {
+          "macro_alignment": "rates/cycle backdrop supports the sector (e.g. cyclicals risk-on, defensives risk-off)",
+          "sector_earnings_revision_breadth": "positive",
+          "constituent_breadth": "% of sector above 50DMA rising"
+        }
+      },
+      "technical_block": {
+        "relative_strength": "sector ETF RS line vs benchmark rising; RS rank top quartile",
+        "trend": "sector ETF above rising 50DMA; 3- and 6-month momentum positive",
+        "rotation_signal": "sector crosses up through its relative-strength moving average",
+        "entry_trigger": "buy sector ETF or top 2-3 leaders on pullback or fresh breakout",
+        "stop_logic": "sector ETF below 50DMA or RS leadership breaks down",
+        "target_logic": "hold while RS leadership persists; rotate out when it fades",
+        "min_reward_to_risk": 1.5
+      },
+      "score_weights": {"regime": 0.35, "technical": 0.35, "fundamental": 0.25, "news_sentiment": 0.05},
+      "required_gates": ["sector_RS_rising", "sector_above_50DMA", "macro_alignment"],
+      "skip_rules": ["RS rolling over", "breadth deteriorating", "sector below 50DMA"]
+    },
+    {
+      "id": "S9",
+      "name": "Range / Risk-Off Mean Reversion (index & defensives)",
+      "category": "Mean reversion - non-trending regime",
+      "signal_timeframe": "5m / daily",
+      "context_timeframe": "daily, weekly",
+      "holding_period": "intraday to a few days",
+      "best_regimes": ["range"],
+      "avoid_regimes": ["bullish", "bearish", "event_risk"],
+      "fundamental_block": {
+        "purpose": "Fade extremes only in stable, low-event instruments.",
+        "filters": {
+          "instrument_profile": "index ETF or low-beta dividend-stable names with strong balance sheets",
+          "binary_event_risk": "none in the trade window",
+          "macro_calendar": "no major data/print during hold"
+        }
+      },
+      "technical_block": {
+        "range_definition": "clear horizontal support/resistance; ADX(14) < 20 (non-trending)",
+        "required_conditions": [
+          "price tags lower Bollinger Band (20,2) at range support",
+          "RSI(2) oversold or RSI(14) < 35",
+          "reversal candle at support"
+        ],
+        "entry_trigger": "reversal confirmation at support (fade the extreme)",
+        "stop_logic": "below range support (a clean break invalidates the thesis)",
+        "target_logic": "mean (20MA / Bollinger midband) or opposite band; take profit quickly ~1-1.5R",
+        "min_reward_to_risk": 1.2
+      },
+      "score_weights": {"technical": 0.60, "regime": 0.25, "fundamental": 0.10, "news_sentiment": 0.05},
+      "required_gates": ["regime_range", "ADX_below_20", "at_support_with_reversal"],
+      "skip_rules": ["ADX rising (trend starting)", "range breaking", "event risk present"]
+    }
+  ],
+  "agent_mapping": {
+    "Market Regime Agent": "Sets best_regimes gate for every strategy; disables strategies whose regime is absent.",
+    "Sector Rotation Agent": "Feeds S8 directly; supplies sector_in_favor / sector strength to S1-S7.",
+    "Stock Universe Agent": "Applies fundamental_block liquidity/float/earnings filters to build each strategy's candidate list.",
+    "Fundamental Analysis Agent": "Scores fundamental_block for S5, S6, S7 (heavy) and quality checks for S1-S4 (light).",
+    "Valuation Agent": "Drives S6 margin-of-safety and informs S5/S7.",
+    "News/Sentiment Agent": "Validates catalyst_required gates (S1, S4, S7) and avoids landmines.",
+    "Technical Analysis Agent": "Computes all technical_block indicators deterministically (TA library, not the LLM).",
+    "Smart Money Concepts Agent": "Owns S3 sequence (sweep -> CHoCH -> FVG/order block).",
+    "Strategy Builder Agent": "Fuses agent scores with score_weights, checks required_gates, emits the rule set.",
+    "Risk Manager Agent": "Applies global_risk_model, sizes the position, enforces PDT + daily loss, holds final veto.",
+    "Backtest Agent": "Runs each strategy with realistic costs across regimes before it is allowed live.",
+    "Execution Agent": "Paper by default; live only after repeated out-of-sample validation.",
+    "Monitoring Agent": "Tracks PnL, slippage, data quality; trips the kill switch."
+  },
+  "reality_checks": [
+    "Indicators, scores, position sizes and backtest metrics must be computed in deterministic code, not invented by the LLM.",
+    "1-minute strategies (S1-S4, S9 intraday) are noise- and cost-sensitive; slippage and spread can erase backtested edge.",
+    "Every strategy must pass walk-forward and out-of-sample tests, across multiple regimes, with realistic commissions and slippage, before any live capital.",
+    "Paper-trade first. Keep a hard kill switch and max-daily-loss limit wired to the Monitoring Agent.",
+    "This is an engineering specification, not investment advice."
+  ]
+}

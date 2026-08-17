@@ -60,6 +60,15 @@ class Assumptions:
     atr_period: int = 14
     bollinger_period: int = 20
     bollinger_sigma: float = 2.0
+    adx_period: int = 14
+    adx_trend_floor: float = 20.0     # ADX above this = trending, below = range
+
+    # --- Signals / strategies (§S) --------------------------------------
+    min_fused_score: float = 65.0     # fused score needed before a setup is actionable
+    risk_per_trade_pct: float = 0.5   # paper-trading position sizing
+    max_open_positions: int = 5
+    starting_cash: float = 1_000_000.0
+    round_trip_cost_bps: float = 30.0 # brokerage + STT + exchange + GST + stamp + slippage
 
     def as_rows(self, defaults: Optional["Assumptions"] = None) -> List[dict]:
         """Flatten to ``assumption`` table rows, marking overrides."""
@@ -98,6 +107,10 @@ _UNITS: Dict[str, str] = {
     "intangibles_max_pct": "% of net worth",
     "receivable_provision_max_pct": "% of receivables",
     "risk_free_rate": "fraction/yr",
+    "adx_trend_floor": "ADX",
+    "min_fused_score": "0-100",
+    "risk_per_trade_pct": "% of equity",
+    "round_trip_cost_bps": "bps",
 }
 
 _RATIONALE: Dict[str, str] = {
@@ -118,6 +131,66 @@ _RATIONALE: Dict[str, str] = {
 
 
 @dataclass
+class DataSettings:
+    """Credentials and endpoints for the data layer, read from the environment.
+
+    Keys are never hardcoded and never written into a report. A provider with
+    no key simply does not join the chain, which shows up as a coverage gap
+    rather than a crash.
+    """
+
+    twelvedata_api_key: str = ""
+    indian_api_base_url: str = ""
+    alpaca_key_id: str = ""
+    alpaca_secret_key: str = ""
+    alpaca_base_url: str = "https://data.alpaca.markets"
+    benchmark: str = ""               # resolved per market when blank
+    watchlist: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_env(cls, env: Optional[Dict[str, str]] = None) -> "DataSettings":
+        import os
+
+        e = env if env is not None else os.environ
+        watchlist = [
+            t.strip() for t in (e.get("WATCHLIST", "") or "").split(",") if t.strip()
+        ]
+        return cls(
+            twelvedata_api_key=e.get("TWELVEDATA_API_KEY", "") or "",
+            indian_api_base_url=e.get("INDIAN_API_BASE_URL", "") or "",
+            alpaca_key_id=e.get("ALPACA_KEY_ID", "") or "",
+            alpaca_secret_key=e.get("ALPACA_SECRET_KEY", "") or "",
+            alpaca_base_url=e.get("ALPACA_BASE_URL", "") or "https://data.alpaca.markets",
+            benchmark=e.get("BENCHMARK", "") or "",
+            watchlist=watchlist,
+        )
+
+    @property
+    def configured(self) -> List[str]:
+        names = []
+        if self.twelvedata_api_key:
+            names.append("twelvedata")
+        if self.indian_api_base_url:
+            names.append("indian_api")
+        if self.alpaca_key_id and self.alpaca_secret_key:
+            names.append("alpaca")
+        return names
+
+
+#: Benchmark index per market, for §S regime detection.
+BENCHMARKS = {
+    "IN": "^NSEI", "INDIA": "^NSEI", "NSE": "^NSEI", "BSE": "^BSESN",
+    "US": "^GSPC", "UK": "^FTSE", "EUROPE": "^STOXX50E", "JP": "^N225",
+}
+
+
+def benchmark_for(market: str, override: str = "") -> str:
+    if override:
+        return override
+    return BENCHMARKS.get((market or "").strip().upper(), "^GSPC")
+
+
+@dataclass
 class RunConfig:
     """Everything that identifies and parameterises one analysis run."""
 
@@ -132,6 +205,15 @@ class RunConfig:
     commodities: List[str] = field(default_factory=list)
     price_years: int = 10
     allow_network: bool = True
+    data: DataSettings = field(default_factory=DataSettings)
+    #: §S extras. Off by default so a plain valuation run stays fast.
+    with_signals: bool = False
+    with_backtest: bool = False
+    watchlist: List[str] = field(default_factory=list)
+    benchmark: str = ""
+
+    def resolved_benchmark(self) -> str:
+        return benchmark_for(self.market, self.benchmark or self.data.benchmark)
 
     @property
     def run_id(self) -> str:

@@ -41,6 +41,8 @@ def render(report: Any) -> str:
             _valuation_section(report, currency),
             _fundamentals_section(report, unit),
             _technical_section(report, currency),
+            _signals_section(report, currency),
+            _backtest_section(report, currency),
             _linkage_section(report),
             _forensics_section(report),
             _verification_section(report),
@@ -425,6 +427,134 @@ def _technical_section(report: Any, currency: str) -> str:
       <div class="scroll"><table><tbody>{stat_html}</tbody></table></div>
     </div>
   </div>
+</section>"""
+
+
+def _signals_section(report: Any, currency: str) -> str:
+    """§S Trade setups from the 9-strategy library."""
+    sig = report.signals
+    if sig is None:
+        return ""
+
+    regime = report.regime
+    regime_status = {
+        "bullish": "good", "bearish": "critical", "volatile": "warning",
+        "range": "muted", "unknown": "muted",
+    }.get(getattr(regime, "regime", "unknown"), "muted")
+    drivers = "".join(f"<li>{esc(d)}</li>" for d in (getattr(regime, "drivers", []) or []))
+
+    rows = []
+    for s in sig.signals:
+        status = "good" if s.actionable else "muted"
+        setup = (
+            f"{fmt(s.entry, 2)} / {fmt(s.stop, 2)} / {fmt(s.target, 2)}"
+            if s.entry and s.stop else "—"
+        )
+        blockers = "<br>".join(esc(g) for g in s.gate_failures) or "—"
+        reasons = "; ".join(s.technical_reasons) or "—"
+        flag = " <span class='muted'>(daily-bar proxy)</span>" if s.intraday_approximation else ""
+        rows.append(
+            f"<tr class='{'sig-live' if s.actionable else ''}'>"
+            f"<td><strong>{esc(s.strategy_id)}</strong> {esc(s.strategy)}{flag}"
+            f"<div class='muted'>{esc(s.category)}</div></td>"
+            f"<td class='num'><strong>{s.fused_score:.1f}</strong></td>"
+            f"<td class='num muted'>{s.technical_score:.0f} / {s.fundamental_score:.0f}</td>"
+            f"<td class='num'>{setup}</td>"
+            f"<td class='num'>{fmt(s.reward_risk, 1)}</td>"
+            f"<td><span class='status-{status}'>{'actionable' if s.actionable else 'no trade'}</span>"
+            f"<div class='muted small'>{blockers}</div></td>"
+            f"<td class='muted small'>{esc(reasons)}</td></tr>"
+        )
+
+    notes = "".join(f"<li>{esc(n)}</li>" for n in (sig.notes or []))
+    fund = report.trade_scores or {}
+    subs = " · ".join(
+        f"{k} {v:.0f}" for k, v in (fund.get("subscores") or {}).items()
+    ) or "no sub-scores available"
+
+    return f"""
+<section id="signals">
+  <h2>Trade signals <span class="muted">— {len(sig.actionable)} actionable of {len(sig.signals)}</span></h2>
+  <div class="callout">
+    <strong>Market regime:</strong>
+    <span class="status-{esc(regime_status)} biasword">{esc(getattr(regime, 'regime', 'unknown'))}</span>
+    <span class="muted">({getattr(regime, 'confidence', 0):.0f}% confidence ·
+      benchmark {esc(getattr(regime, 'benchmark', '—'))})</span>
+    <ul class="notes">{drivers}</ul>
+  </div>
+  {C.signal_scores(sig, sig.min_score)}
+  <div class="scroll"><table class="signals">
+    <thead><tr><th>Strategy</th><th>Fused</th><th>Tech / Fund</th>
+      <th>Entry / Stop / Target</th><th>R:R</th><th>Status</th><th>Technical reasons</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table></div>
+  <p class="note"><strong>Trading-lens fundamental score:</strong>
+    {fmt(fund.get('fundamental_score'), 1)} / 100 ({esc(subs)}).
+    This is deliberately separate from the intrinsic-value work above: it asks
+    "is this a tradeable setup", not "what is the business worth".</p>
+  <ul class="notes">{notes}</ul>
+  <p class="note">A setup is actionable only when the fused score clears
+    {sig.min_score:.0f} <em>and</em> every hard gate passes. Any single gate
+    failure is a no-trade however high the score — the blocking gate is named
+    above rather than the setup being hidden.</p>
+</section>"""
+
+
+def _backtest_section(report: Any, currency: str) -> str:
+    """§S Cost-aware backtest of the daily-bar rule sets."""
+    results = report.backtests or []
+    if not results:
+        return ""
+
+    blocks = []
+    for result in results:
+        chart = C.equity_curve(result, currency)
+        if not result.ok:
+            blocks.append(chart)
+            continue
+        m = result.metrics
+        beats = (m.get("excess_vs_buy_hold_pct") or 0) > 0
+        cells = [
+            ("Trades", str(m["trades"])),
+            ("Win rate", f"{m['win_rate_pct']:.0f}%"),
+            ("Expectancy / trade", f"{m['expectancy_pct']:+.2f}%"),
+            ("Profit factor", fmt(m.get("profit_factor"), 2)),
+            ("Total return", f"{m['total_return_pct']:+.1f}%"),
+            ("CAGR", fmt(m.get("cagr_pct"), 1, "%")),
+            ("Max drawdown", f"{m['max_drawdown_pct']:.1f}%"),
+            ("Sharpe", fmt(m.get("sharpe"), 2)),
+            ("Exposure", f"{m['exposure_pct']:.0f}%"),
+            ("Buy & hold", f"{m['buy_hold_pct']:+.1f}%"),
+            ("Excess vs buy & hold", f"{m['excess_vs_buy_hold_pct']:+.1f}%"),
+            ("Round-trip cost", f"{m['round_trip_bps']:.0f} bps"),
+        ]
+        grid = "".join(
+            f"<div class='stat'><p class='statlabel'>{esc(k)}</p>"
+            f"<p class='statvalue'>{esc(v)}</p></div>"
+            for k, v in cells
+        )
+        verdict = (
+            "<p class='callout'>This rule set beat buy-and-hold after costs over "
+            "this window.</p>" if beats else
+            "<p class='callout warning'>This rule set <strong>underperformed "
+            "buy-and-hold</strong> after costs over this window. A signal being "
+            "generated is not evidence that trading it pays.</p>"
+        )
+        notes = "".join(f"<li>{esc(n)}</li>" for n in (result.notes or []))
+        blocks.append(
+            f"{chart}<div class='stats'>{grid}</div>{verdict}"
+            f"<ul class='notes'>{notes}</ul>"
+        )
+
+    return f"""
+<section id="backtest">
+  <h2>Backtest</h2>
+  {''.join(blocks)}
+  <p class="note">Entries fill at the signal bar's close; stops and targets fill
+    gap-aware against later bars' high/low. Costs are one round trip in basis
+    points covering brokerage, STT, exchange fees, GST, stamp duty and slippage.
+    Past results carry no guarantee of future returns, and a backtest is the
+    weakest form of evidence a strategy can offer — validate out of sample.</p>
 </section>"""
 
 
@@ -833,6 +963,14 @@ tr.current td{font-weight:620}
 .sqlblock code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem;
   color:var(--text-secondary);white-space:pre}
 
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:8px;margin:12px 0}
+.stat{background:var(--surface-1);border:1px solid var(--border);border-radius:9px;padding:9px 12px}
+.statlabel{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+  font-weight:640;margin:0}
+.statvalue{font-size:1.02rem;font-weight:640;margin:.15em 0 0}
+.signals .small{font-size:.76rem}
+.signals tr.sig-live td{background:color-mix(in srgb,var(--status-good) 8%,transparent)}
+.callout:not(.critical):not(.warning){background:var(--surface-1)}
 .pagefoot{margin-top:44px;border-top:1px solid var(--border);padding-top:16px}
 .disclaimer{font-size:.85rem;color:var(--text-secondary)}
 .pagefoot .muted{font-size:.75rem}

@@ -37,6 +37,11 @@ class Report:
     verification: Any = None
     query_log: QueryLog = field(default_factory=QueryLog)
     warnings: List[str] = field(default_factory=list)
+    # §S ported from indian-stock-signal-ai
+    regime: Any = None
+    signals: Any = None
+    backtests: List[Any] = field(default_factory=list)
+    trade_scores: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def currency(self) -> str:
@@ -89,6 +94,9 @@ def run(config: RunConfig) -> Report:
         report.company.get("currency") or "",
         config.assumptions,
     )
+    if config.with_signals or config.with_backtest:
+        _signals_and_backtest(db, config, report, log)
+
     report.verification = verification_mod.score(
         db, config, result, report.fundamentals, report.forensic,
         report.valuation, report.technicals,
@@ -97,6 +105,144 @@ def run(config: RunConfig) -> Report:
     for domain, reason in (result.gaps or {}).items():
         report.warnings.append(f"{domain}: {reason}")
     return report
+
+
+def _signals_and_backtest(
+    db: Database, config: RunConfig, report: Report, log: QueryLog
+) -> None:
+    """§S regime -> per-strategy signals -> cost-aware backtest."""
+    from .analysis import regime as regime_mod
+    from .strategies import engine as strategy_engine
+
+    a = config.assumptions
+    rows = log.run(
+        db, "signal_price_series",
+        "SELECT date, open, high, low, close, volume FROM price_daily "
+        "WHERE ticker = ? ORDER BY date",
+        (config.ticker,),
+        "Daily bars feeding the strategy snapshot and the backtester.",
+    )
+
+    benchmark = config.resolved_benchmark()
+    report.regime = _detect_regime(db, config, report, benchmark, a)
+
+    snapshot = regime_mod.snapshot(rows, a)
+    report.trade_scores = regime_mod.fundamental_score(report.fundamentals, a)
+
+    if config.with_signals:
+        report.signals = strategy_engine.evaluate(
+            snapshot, report.trade_scores, report.regime, a
+        )
+        _persist_signals(db, config, report)
+
+    if config.with_backtest:
+        from . import backtest as backtest_mod
+
+        report.backtests = backtest_mod.run_all(
+            rows, a, start_cash=a.starting_cash
+        )
+        for result in report.backtests:
+            if not result.ok:
+                report.warnings.append(
+                    f"backtest {result.strategy_id}: {result.error}"
+                )
+        _persist_backtests(db, config, report)
+
+
+def _detect_regime(
+    db: Database, config: RunConfig, report: Report, benchmark: str, a: Any
+) -> Any:
+    from .analysis import regime as regime_mod
+
+    rows: List[Dict[str, Any]] = []
+    if config.allow_network and not config.offline_file:
+        try:
+            from .providers import fetch_benchmark_history
+
+            rows = fetch_benchmark_history(benchmark, config.data, years=3)
+        except Exception as exc:
+            report.warnings.append(
+                f"Benchmark {benchmark} unavailable ({exc}); market regime is "
+                f"reported as unknown, which gates every strategy off."
+            )
+    else:
+        # Offline: fall back to the subject's own series so the regime code
+        # path still runs. Labelled, because a single stock is not the market.
+        rows = db.dicts(
+            "SELECT date, open, high, low, close, volume FROM price_daily "
+            "WHERE ticker = ? ORDER BY date",
+            (config.ticker,),
+        )
+        if rows:
+            report.warnings.append(
+                f"No benchmark feed available offline; regime was derived from "
+                f"{config.ticker}'s own price action, not from {benchmark}. "
+                f"Treat the regime label as indicative only."
+            )
+            benchmark = f"{config.ticker} (self, no benchmark)"
+
+    detected = regime_mod.detect_regime(rows, a, benchmark)
+    db.insert("market_regime", {
+        "run_id": config.run_id,
+        "benchmark": benchmark,
+        "as_of": detected.as_of,
+        "regime": detected.regime,
+        "confidence": detected.confidence,
+        "atr_pct": detected.atr_pct,
+        "drivers": "\n".join(detected.drivers),
+    })
+    return detected
+
+
+def _persist_signals(db: Database, config: RunConfig, report: Report) -> None:
+    db.insert_many("signal", [
+        {
+            "run_id": config.run_id, "ticker": config.ticker,
+            "strategy_id": s.strategy_id, "strategy": s.strategy,
+            "category": s.category, "archetype": s.archetype, "bias": s.bias,
+            "fused_score": s.fused_score, "technical_score": s.technical_score,
+            "fundamental_score": s.fundamental_score, "regime_score": s.regime_score,
+            "regime_fit": int(s.regime_fit), "entry": s.entry, "stop": s.stop,
+            "target": s.target, "reward_risk": s.reward_risk,
+            "technical_reasons": "\n".join(s.technical_reasons),
+            "gate_failures": "\n".join(s.gate_failures),
+            "intraday_approx": int(s.intraday_approximation),
+            "as_of": report.snapshot.get("as_of"),
+        }
+        for s in report.signals.signals
+    ])
+
+
+def _persist_backtests(db: Database, config: RunConfig, report: Report) -> None:
+    for result in report.backtests:
+        m = result.metrics or {}
+        db.insert("backtest_result", {
+            "run_id": config.run_id, "ticker": config.ticker,
+            "strategy_id": result.strategy_id, "archetype": result.archetype,
+            "period_from": m.get("from"), "period_to": m.get("to"),
+            "trades": m.get("trades"), "win_rate_pct": m.get("win_rate_pct"),
+            "expectancy_pct": m.get("expectancy_pct"),
+            "profit_factor": m.get("profit_factor"),
+            "total_return_pct": m.get("total_return_pct"),
+            "cagr_pct": m.get("cagr_pct"),
+            "max_drawdown_pct": m.get("max_drawdown_pct"),
+            "sharpe": m.get("sharpe"), "exposure_pct": m.get("exposure_pct"),
+            "buy_hold_pct": m.get("buy_hold_pct"),
+            "excess_vs_buy_hold_pct": m.get("excess_vs_buy_hold_pct"),
+            "round_trip_bps": m.get("round_trip_bps"),
+            "intraday_approx": int(result.intraday_approximation),
+            "error": result.error,
+        })
+        db.insert_many("backtest_trade", [
+            {
+                "run_id": config.run_id, "ticker": config.ticker,
+                "strategy_id": result.strategy_id,
+                "entry_date": t.entry_date, "exit_date": t.exit_date,
+                "entry": t.entry, "exit": t.exit, "return_pct": t.return_pct,
+                "bars_held": t.bars_held, "reason": t.reason,
+            }
+            for t in result.trades
+        ])
 
 
 # -- staging ---------------------------------------------------------------

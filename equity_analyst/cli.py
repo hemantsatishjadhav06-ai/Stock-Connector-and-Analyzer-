@@ -12,7 +12,7 @@ import os
 import sys
 from typing import List, Optional
 
-from .config import Assumptions, RunConfig
+from .config import Assumptions, DataSettings, RunConfig
 from .pipeline import run
 from .report import render
 
@@ -41,6 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-bundle", help="save the raw pull to JSON for later replay")
     p.add_argument("--no-network", action="store_true", help="never touch the network")
 
+    s = p.add_argument_group("signals & backtest (§S, from indian-stock-signal-ai)")
+    s.add_argument("--signals", action="store_true",
+                   help="score the 9-strategy library and emit trade setups")
+    s.add_argument("--backtest", action="store_true",
+                   help="run the cost-aware backtester over the price history")
+    s.add_argument("--benchmark", default="",
+                   help="regime benchmark (default: ^NSEI for India, ^GSPC for US)")
+    s.add_argument("--cost-bps", type=float, default=None,
+                   help="round-trip cost in basis points (default 30)")
+    s.add_argument("--risk-pct", type=float, default=None,
+                   help="risk per trade as %% of equity (default 0.5)")
+
     g = p.add_argument_group("assumption overrides (§6)")
     g.add_argument("--fcf-growth", type=float, help="FCF growth, years 1-10 (default 0.20)")
     g.add_argument("--discount-rate", type=float, help="default 0.07")
@@ -60,6 +72,8 @@ def _assumptions(args: argparse.Namespace) -> Assumptions:
         ("sustainable_pe", "avg_sustainable_pe"),
         ("cost_of_capital", "cost_of_capital"),
         ("margin_of_safety", "margin_of_safety"),
+        ("cost_bps", "round_trip_cost_bps"),
+        ("risk_pct", "risk_per_trade_pct"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -82,6 +96,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         commodities=args.commodities,
         price_years=args.price_years,
         allow_network=not args.no_network,
+        data=DataSettings.from_env(),
+        with_signals=args.signals,
+        with_backtest=args.backtest,
+        benchmark=args.benchmark,
     )
 
     report = run(config)
@@ -140,6 +158,52 @@ def summarise(report) -> str:
         f"  Buy below (50% MoS)       {money(getattr(v, 'buy_below', None))}",
         f"  Current price             {money(getattr(v, 'current_price', None))}",
     ]
+    if report.regime is not None:
+        lines += [
+            "  " + "─" * 64,
+            f"  Market regime        {report.regime.regime} "
+            f"({report.regime.confidence:.0f}% confidence, {report.regime.benchmark})",
+        ]
+        for driver in report.regime.drivers:
+            lines.append(f"      · {driver}")
+
+    if report.signals is not None:
+        lines.append("  " + "─" * 64)
+        actionable = report.signals.actionable
+        lines.append(
+            f"  Signals              {len(actionable)} actionable of "
+            f"{len(report.signals.signals)} strategies "
+            f"(fused score must clear {report.signals.min_score:.0f})"
+        )
+        for s in report.signals.signals[:4]:
+            mark = "▶" if s.actionable else "·"
+            lines.append(
+                f"    {mark} {s.strategy_id} {s.strategy[:38]:<38} {s.fused_score:5.1f}"
+            )
+            if s.actionable and s.entry:
+                lines.append(
+                    f"        entry {s.entry:,.2f}  stop {s.stop:,.2f}  "
+                    f"target {s.target:,.2f}  R:R {s.reward_risk}"
+                )
+            elif s.gate_failures:
+                lines.append(f"        blocked: {s.gate_failures[0]}")
+
+    for bt in report.backtests or []:
+        lines.append("  " + "─" * 64)
+        if not bt.ok:
+            lines.append(f"  Backtest {bt.strategy_id:<12} {bt.error}")
+            continue
+        m = bt.metrics
+        lines.append(
+            f"  Backtest {bt.archetype:<16} {m['trades']} trades · "
+            f"win {m['win_rate_pct']:.0f}% · expectancy {m['expectancy_pct']:+.2f}%"
+        )
+        lines.append(
+            f"      total {m['total_return_pct']:+.1f}% vs buy-hold "
+            f"{m['buy_hold_pct']:+.1f}% · maxDD {m['max_drawdown_pct']:.1f}% · "
+            f"Sharpe {m['sharpe']} · costs {m['round_trip_bps']:.0f}bps"
+        )
+
     breaches = [c for c in (getattr(f, "breaches", []) or [])]
     if breaches:
         lines.append("")

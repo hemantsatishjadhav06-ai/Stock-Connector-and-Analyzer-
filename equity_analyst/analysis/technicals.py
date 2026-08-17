@@ -40,6 +40,11 @@ class TechnicalResult:
     percent_b: Optional[float] = None
     volume_trend: Optional[str] = None
     volume_ratio: Optional[float] = None
+    adx: Optional[float] = None
+    plus_di: Optional[float] = None
+    minus_di: Optional[float] = None
+    vwap: Optional[float] = None
+    relative_volume: Optional[float] = None
     support: List[float] = field(default_factory=list)
     resistance: List[float] = field(default_factory=list)
     fifty_two_week_high: Optional[float] = None
@@ -101,6 +106,12 @@ def analyse(db: Any, ticker: str, config: Any, log: QueryLog) -> TechnicalResult
         res.percent_b = (res.last_close - lower) / (upper - lower)
 
     res.volume_trend, res.volume_ratio = _volume_trend(volumes)
+
+    adx_s, plus_s, minus_s = adx_series(highs, lows, closes, a.adx_period)
+    res.adx, res.plus_di, res.minus_di = adx_s[-1], plus_s[-1], minus_s[-1]
+    vwap_s = vwap_series(highs, lows, closes, volumes)
+    res.vwap = vwap_s[-1]
+    res.relative_volume = relative_volume(volumes)
 
     window = res.prices[-252:] if len(res.prices) >= 252 else res.prices
     res.fifty_two_week_high = max(r["close"] for r in window)
@@ -227,6 +238,113 @@ def bollinger(values: Sequence[float], period: int = 20, sigma: float = 2.0):
     mid = sum(window) / period
     sd = stdev(window) or 0.0
     return mid + sigma * sd, mid, mid - sigma * sd
+
+
+def adx_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+):
+    """Wilder's ADX with +DI / -DI.
+
+    Returns ``(adx, plus_di, minus_di)`` as full-length lists so the caller can
+    align them with dates. Directional movement is only counted when one side
+    genuinely exceeds the other, which is what separates trend from chop.
+    """
+    n = len(closes)
+    empty = [None] * n
+    if n <= period + 1:
+        return empty, empty, empty
+
+    plus_dm, minus_dm, trs = [], [], []
+    for i in range(1, n):
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm.append(up if (up > down and up > 0) else 0.0)
+        minus_dm.append(down if (down > up and down > 0) else 0.0)
+        trs.append(
+            max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+        )
+
+    def wilder(seq):
+        out, value = [], sum(seq[:period]) / period
+        out.append(value)
+        for v in seq[period:]:
+            value = (value * (period - 1) + v) / period
+            out.append(value)
+        return out
+
+    atr_s, plus_s, minus_s = wilder(trs), wilder(plus_dm), wilder(minus_dm)
+
+    plus_di, minus_di, dx = [], [], []
+    for a, p, m in zip(atr_s, plus_s, minus_s):
+        if not a:
+            plus_di.append(None); minus_di.append(None); dx.append(None)
+            continue
+        pdi, mdi = 100.0 * p / a, 100.0 * m / a
+        plus_di.append(pdi)
+        minus_di.append(mdi)
+        total = pdi + mdi
+        dx.append(abs(pdi - mdi) / total * 100.0 if total else None)
+
+    clean = [d for d in dx if d is not None]
+    adx_vals: List[Optional[float]] = []
+    if len(clean) >= period:
+        value = sum(clean[:period]) / period
+        adx_vals = [None] * (period - 1) + [value]
+        for d in clean[period:]:
+            value = (value * (period - 1) + d) / period
+            adx_vals.append(value)
+
+    # Left-pad each series back to the length of the input.
+    def pad(seq):
+        return [None] * (n - len(seq)) + list(seq) if len(seq) <= n else list(seq)[-n:]
+
+    return pad(adx_vals), pad(plus_di), pad(minus_di)
+
+
+def vwap_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    window: Optional[int] = None,
+) -> List[Optional[float]]:
+    """Volume-weighted average price.
+
+    ``window=None`` gives the cumulative VWAP over the whole series; a window
+    gives a rolling VWAP. On daily bars this is an anchored approximation --
+    true intraday VWAP needs intraday bars, and the report says so.
+    """
+    n = len(closes)
+    out: List[Optional[float]] = []
+    pv_cum = vol_cum = 0.0
+    typical = [
+        (highs[i] + lows[i] + closes[i]) / 3.0 for i in range(n)
+    ]
+    for i in range(n):
+        vol = volumes[i] or 0.0
+        pv_cum += typical[i] * vol
+        vol_cum += vol
+        if window and i >= window:
+            j = i - window
+            pv_cum -= typical[j] * (volumes[j] or 0.0)
+            vol_cum -= volumes[j] or 0.0
+        out.append(pv_cum / vol_cum if vol_cum > 0 else None)
+    return out
+
+
+def relative_volume(volumes: Sequence[float], period: int = 20) -> Optional[float]:
+    """Latest volume against its recent average -- the RVOL several strategies gate on."""
+    if len(volumes) < period + 1:
+        return None
+    base = sum(volumes[-(period + 1):-1]) / period
+    return (volumes[-1] / base) if base > 0 else None
 
 
 # -- derived reads ---------------------------------------------------------
