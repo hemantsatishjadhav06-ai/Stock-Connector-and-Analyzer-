@@ -63,7 +63,13 @@ def run(config: RunConfig) -> Report:
 
 
 def _run(config: RunConfig) -> Report:
-    db = Database(config.db_path)
+    if config.db_handle is not None:
+        # Warehouse mode: reuse the shared connection and replace only this
+        # company's staged rows, so other companies in the file survive.
+        db = config.db_handle
+        db.clear_company(config.ticker)
+    else:
+        db = Database(config.db_path)
     db.start_run(
         config.run_id, config.ticker, config.market, config.horizon_years, ENGINE_VERSION
     )

@@ -137,3 +137,87 @@ collapsing them would hide exactly the disagreement a reader needs to see.
 5. **The backtester must not see the future.** Indicators are computed on
    expanding prefixes; the entry decision and its fill both use the same bar's
    close.
+
+---
+
+## The web layer and the warehouse
+
+The engine started as a one-shot CLI: one company, one run, a database rebuilt
+from source each time. Serving *any* company from a website needs three things
+that shape does not have — name resolution, a store that survives runs, and
+refreshes that happen without a human.
+
+```mermaid
+flowchart TB
+  U([User types a company name]) --> S[search.py]
+  S -->|alias cache| W[(warehouse.sqlite)]
+  S -->|SEC directory in SQL| W
+  S -->|Screener.in / Yahoo| NET[(live lookup)]
+  S --> D{One clear match?}
+  D -->|no| PICK[Disambiguation page]
+  D -->|yes| C[/company/ticker/]
+  PICK --> C
+  C --> Q{Cached & fresh?}
+  Q -->|yes| R[Serve cached report]
+  Q -->|no| J[Queue background job]
+  J --> P[pipeline.run]
+  P --> W
+  P --> CACHE[report_cache]
+  CACHE --> R
+  SCHED[Scheduler] -->|stale companies| P
+```
+
+### Name resolution
+
+`search.py` normalises the typed text (lowercase, strip punctuation, drop legal
+suffixes so "Apple Inc." and "apple" are the same string), then scores
+candidates from four layers, cheapest first: the alias cache, the locally synced
+SEC registrant directory, Screener.in, and Yahoo.
+
+**It disambiguates rather than guesses.** Auto-selecting requires a strong match
+that is *clearly ahead* of the runner-up. "hdfc bank" matches both the NSE
+listing and its US ADR exactly, so the user picks; "apple" hits AAPL exactly and
+nothing else does, so it goes straight through. Analysing the wrong company
+silently is a far worse failure than one extra click.
+
+### Two SQL files, two lifetimes
+
+| File | Scope | Lifetime |
+|---|---|---|
+| `sql/schema.sql` | one company's staged statements, prices, analysis | rebuilt per run |
+| `sql/warehouse.sql` | company index, aliases, ticker directory, report cache, refresh log | persists |
+
+Both are applied to the same database in warehouse mode, so a cached report can
+be joined back to the rows that produced it. A refresh calls `clear_company()`
+rather than deleting the file — otherwise refreshing one company would wipe
+every other one.
+
+### Freshness, per domain
+
+Prices go stale in hours; audited statements only move when a company files.
+One timestamp for both would force a full re-scrape every day just to update a
+quote, which is how a deployment gets rate-limited off every free source. The
+index tracks `last_price_refresh` and `last_statement_refresh` separately, and
+each is only stamped when rows actually arrived — a failed pull must not look
+current and stop retrying.
+
+### The downgrade guard
+
+A refresh only publishes if it is **at least as complete** as what it replaces.
+If a run loses the valuation entirely, or verification collapses by more than 15
+points, the previous report stays and the attempt is logged as `partial` with
+the reason. Without this, the first scheduler pass during a source outage would
+overwrite every cached analysis with a near-empty one and the whole site would
+look broken until the source recovered.
+
+### Concurrency
+
+`ThreadingHTTPServer` gives a thread per request; the job runner adds another.
+SQLite connections are not thread-safe, so **every warehouse touch is serialised
+behind one lock** (`web/server.py`, `Site.lock`) and the connection is opened
+with `check_same_thread=False` — the flag is only safe *because* of the lock.
+The database runs in WAL mode so reads continue while a refresh writes.
+
+Analyses default to **one worker**. Every provider is a shared, rate-limited
+public endpoint; running four scrapes at once is the fastest way to get the
+deployment throttled.

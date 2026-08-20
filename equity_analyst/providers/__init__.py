@@ -26,6 +26,7 @@ from .market_data import (
 from .offline import OfflineProvider, result_to_bundle, save_bundle
 from .openbb_provider import OpenBBProvider, openbb_available
 from .screener_in import ScreenerInProvider
+from .sec import SECProvider
 from .yahoo import YahooProvider
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "OfflineProvider",
     "OpenBBProvider",
     "ScreenerInProvider",
+    "SECProvider",
     "YahooProvider",
     "openbb_available",
     "save_bundle",
@@ -74,6 +76,12 @@ def build_chain(config: Any) -> List[Provider]:
     else:
         if openbb_available():
             chain.append(OpenBBProvider())
+        # SEC XBRL is filing-tier -- the statements come from the 10-K itself
+        # rather than a vendor's re-keying -- so it outranks Yahoo for US
+        # fundamentals. It serves no prices, which Yahoo/TwelveData then fill.
+        sec = SECProvider()
+        if sec.supports(market):
+            chain.append(sec)
         chain.append(YahooProvider())
 
     if settings is not None:

@@ -14,6 +14,7 @@ import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "sql", "schema.sql")
+WAREHOUSE_PATH = os.path.join(os.path.dirname(__file__), "sql", "warehouse.sql")
 
 
 def utc_now() -> str:
@@ -23,16 +24,51 @@ def utc_now() -> str:
 class Database:
     """Owns the connection and the staged loads."""
 
-    def __init__(self, path: str = ":memory:"):
+    def __init__(
+        self,
+        path: str = ":memory:",
+        reset: bool = True,
+        warehouse: bool = False,
+        timeout: float = 30.0,
+        cross_thread: bool = False,
+    ):
+        """Open the SQL layer.
+
+        ``reset=True`` (the default for a one-shot CLI run) rebuilds the
+        per-company tables from source, so a run can never quietly inherit a
+        stale figure. ``warehouse=True`` additionally applies ``warehouse.sql``
+        -- the company index, alias and cache tables that must SURVIVE runs --
+        and forces ``reset=False``, because deleting the file would throw away
+        every other company in the warehouse.
+        """
         self.path = path
+        self.warehouse = warehouse
+        if warehouse:
+            reset = False
         if path != ":memory:":
             parent = os.path.dirname(os.path.abspath(path))
-            os.makedirs(parent, exist_ok=True)
-            if os.path.exists(path):
-                os.remove(path)  # a run always rebuilds from source
-        self.conn = sqlite3.connect(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if reset and os.path.exists(path):
+                os.remove(path)
+        # A timeout matters once a web request and the refresh scheduler can
+        # touch the same file: without it a concurrent write fails instantly
+        # instead of waiting for the lock.
+        #
+        # cross_thread lifts sqlite3's same-thread guard. It is ONLY safe
+        # because the web layer serialises every touch of this connection
+        # behind a single lock (see web/server.py, Site.lock) -- a threaded
+        # HTTP server hands each request to a different thread, so without the
+        # lock this flag would trade a clear error for silent corruption.
+        self.conn = sqlite3.connect(
+            path, timeout=timeout, check_same_thread=not cross_thread
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        if path != ":memory:":
+            # WAL lets the server keep reading while a refresh writes.
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA busy_timeout = 30000")
         self._create_schema()
 
     # -- lifecycle -------------------------------------------------------
@@ -40,6 +76,26 @@ class Database:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as fh:
             self.schema_sql = fh.read()
         self.conn.executescript(self.schema_sql)
+        if self.warehouse:
+            with open(WAREHOUSE_PATH, "r", encoding="utf-8") as fh:
+                warehouse_sql = fh.read()
+            self.conn.executescript(warehouse_sql)
+            self.schema_sql = self.schema_sql + "\n" + warehouse_sql
+        self.conn.commit()
+
+    def clear_company(self, ticker: str) -> None:
+        """Drop one company's staged rows without touching the warehouse.
+
+        A refresh must replace a company's data, not append to it: without
+        this, a restated fiscal year would leave the superseded row in place
+        and both would flow into the analysis.
+        """
+        for table in (
+            "income_statement", "balance_sheet", "cash_flow", "price_daily",
+            "shareholding", "ratios_reported", "news_item", "market_snapshot",
+        ):
+            self.conn.execute(f"DELETE FROM {table} WHERE ticker = ?", (ticker,))
+        self.conn.execute("DELETE FROM company WHERE ticker = ?", (ticker,))
         self.conn.commit()
 
     def close(self) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 ENGINE_VERSION = "0.1.0"
 
@@ -210,6 +210,10 @@ class RunConfig:
     #: keep the CLI silent for minutes. 0 disables the ceiling.
     network_budget_seconds: float = 120.0
     data: DataSettings = field(default_factory=DataSettings)
+    #: An already-open warehouse Database. When set, the pipeline stages into
+    #: it (replacing just this company's rows) instead of creating its own,
+    #: which is what lets many companies share one cached SQL file.
+    db_handle: Any = None
     #: §S extras. Off by default so a plain valuation run stays fast.
     with_signals: bool = False
     with_backtest: bool = False

@@ -22,12 +22,13 @@ dev = ["pytest>=7.4"]
 
 [project.scripts]
 equity-analyst = "equity_analyst.cli:main"
+equity-analyst-web = "equity_analyst.web.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["equity_analyst*"]
 
 [tool.setuptools.package-data]
-equity_analyst = ["sql/*.sql"]
+equity_analyst = ["sql/*.sql", "strategies/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

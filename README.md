@@ -42,12 +42,53 @@ line, and explains the divergence.
 
 ---
 
-## Install and run
+## The website — type a name, get a report
+
+```bash
+git clone <this repo> && cd Stock-Connector-and-Analyzer-
+python3 -m equity_analyst.web            # http://127.0.0.1:8000
+```
+
+Type **Apple**, **Reliance Industries**, **Infosys** — any listed company. The
+site resolves the name to a ticker, scrapes the filings and price history,
+stores everything in SQLite, runs the full analysis and serves the report.
+Second visit is instant, because the report is cached.
+
+| Page | What it does |
+|---|---|
+| `/` | search box + recently analysed companies |
+| `/search?q=…` | disambiguation when a name matches more than one company |
+| `/company/<ticker>` | the full report, with a refresh button |
+| `/companies` | every company analysed, with verdicts side by side |
+| `/status` | freshness, running jobs, refresh history |
+| `/api/search`, `/api/companies`, `/api/company/<t>`, `/api/job/<t>` | JSON |
+
+Run it with a refresh loop so the data keeps itself current:
+
+```bash
+python3 -m equity_analyst.web --scheduler --interval 3600 --host 0.0.0.0
+```
+
+One-shot maintenance, for cron or CI:
+
+```bash
+python3 -m equity_analyst.web --sync-directory     # refresh the SEC name index
+python3 -m equity_analyst.web --refresh AAPL       # one company
+python3 -m equity_analyst.web --refresh-stale      # everything past its window
+```
+
+An analysis takes tens of seconds, so a cache miss queues a background job and
+the page polls until it is ready — requests never block on a scrape. Concurrent
+analyses default to **one**: every source here is a shared, rate-limited public
+endpoint, and parallel scraping is the fastest way to get throttled.
+
+---
+
+## Command line
 
 No required dependencies — Python 3.9+ standard library only.
 
 ```bash
-git clone <this repo> && cd Stock-Connector-and-Analyzer-
 python3 -m equity_analyst.cli AAPL --market US --out reports/aapl.html
 ```
 
@@ -167,10 +208,14 @@ scored in the verification total.
 
 | Market | Primary | Fallback |
 |---|---|---|
+| US | **SEC EDGAR XBRL** — the 10-K itself, filing tier | OpenBB, Yahoo, TwelveData, Alpaca |
 | India | Screener.in (audited-filing aggregator) | Yahoo `.NS`, TwelveData, Indian-Stock-Market-API |
-| US | OpenBB (when installed) | Yahoo, TwelveData, Alpaca |
 | Everywhere else | OpenBB, when installed | Yahoo, TwelveData |
 | Any | an offline JSON bundle | — |
+
+**Company lookup** is layered the same way: the alias cache, then the locally
+synced SEC registrant directory (~10k names, searched in SQL with no network),
+then Screener.in for India, then Yahoo for everything else.
 
 Keyed providers join the chain automatically when their credentials are present
 in the environment — no key, no provider, and the absence shows up as a coverage
@@ -216,7 +261,7 @@ fetches are skipped, the run finishes on what it has, and the report says so.
 ## Development
 
 ```bash
-python3 -m pytest tests/ -q          # 148 tests, no network required
+python3 -m pytest tests/ -q          # 205 tests, no network required
 python3 tools/make_sample_bundle.py  # regenerate the synthetic fixture
 ```
 
@@ -226,7 +271,11 @@ appears. It exists so the engine can be exercised and demonstrated offline.
 
 ```
 equity_analyst/
-  sql/schema.sql     tables + derived views (the arithmetic lives here)
+  sql/schema.sql     per-company tables + derived views (rebuilt each run)
+  sql/warehouse.sql  company index, aliases, report cache (persists)
+  search.py          name -> ticker resolution across markets
+  warehouse.py       persistent store, freshness policy, refresh cycle
+  web/               server, pages, background jobs, scheduler
   providers/         Screener.in · Yahoo · OpenBB · TwelveData · Alpaca · offline
   analysis/          §3 fundamentals · §4 forensics · §5 technicals · linkage · regime
   valuation/         §6 the four models + margin of safety
